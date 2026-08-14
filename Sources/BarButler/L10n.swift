@@ -86,6 +86,9 @@ enum L {
                                 "授權「輔助使用」後可直接點擊圖示",
                                 "授权“辅助功能”后可直接点击图标")
     static let floatGrant = Tr("Grant…", "前往授權", "前往授权")
+    static let floatNeedAX = Tr("Accessibility permission is needed to click icons for you — grant it, then try again",
+                                "需要「輔助使用」權限才能代你點擊圖示──授權後再試一次",
+                                "需要“辅助功能”权限才能代你点击图标——授权后再试一次")
     static let rowHotkey = Tr("Global Hotkey", "全域快捷鍵", "全局快捷键")
     static let rowHotkeySub = Tr("Toggle from any app", "在任何 App 中快速切換", "在任何 App 中快速切换")
     static let recordPrompt = Tr("Press shortcut… (Esc to cancel)", "請按下組合鍵…（Esc 取消）", "请按下组合键…（Esc 取消）")

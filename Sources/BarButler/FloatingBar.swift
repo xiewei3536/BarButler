@@ -54,66 +54,31 @@ enum AXPresser {
         _ = AXIsProcessTrustedWithOptions(opts)
     }
 
-    /// 觸發該 App 的狀態列圖示：等圖示真正出現在畫面上，對其中心送出「合成滑鼠點擊」
-    /// （與親手點擊等效，選單／彈窗一定會開）；圖示始終不在畫面上時退回 AXPress。
-    static func trigger(entry: HiddenEntry, groupOfSamePid group: [HiddenEntry]) {
-        guard let el = element(for: entry, group: group) else { return }
-        attemptClick(el, attemptsLeft: 10)
-    }
-
-    private static func attemptClick(_ el: AXUIElement, attemptsLeft: Int) {
-        if let f = frame(of: el), f.width > 0, xOnSomeScreen(f.midX) {
-            syntheticClick(at: CGPoint(x: f.midX, y: f.midY))
+    /// 一步到位：展開後輪詢該圖示「視窗」的最新座標（視窗編號不變），
+    /// 一回到畫面上就對其中心送出合成點擊——與親手點擊等效，該圖示的選單立即展開。
+    /// 以視窗編號定位，不依賴 AX 元件枚舉，Electron 等特殊 App 也適用。
+    static func clickStatusWindow(windowID: Int, attemptsLeft: Int = 14) {
+        if let b = currentBounds(windowID: windowID), b.width > 0, xOnSomeScreen(b.midX) {
+            syntheticClick(at: CGPoint(x: b.midX, y: b.midY))
             return
         }
-        guard attemptsLeft > 0 else {
-            AXUIElementPerformAction(el, kAXPressAction as CFString) // 最後手段
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            attemptClick(el, attemptsLeft: attemptsLeft - 1)
+        guard attemptsLeft > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            clickStatusWindow(windowID: windowID, attemptsLeft: attemptsLeft - 1)
         }
     }
 
-    private static func element(for entry: HiddenEntry, group: [HiddenEntry]) -> AXUIElement? {
-        let appEl = AXUIElementCreateApplication(entry.pid)
-        var extrasRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appEl, "AXExtrasMenuBar" as CFString, &extrasRef) == .success,
-              let extrasAny = extrasRef, CFGetTypeID(extrasAny) == AXUIElementGetTypeID()
-        else { return nil }
-        let kids = children(of: extrasAny as! AXUIElement)
-        guard !kids.isEmpty else { return nil }
-
-        // 同一 App 有多個圖示時，用「由左至右的序位」對應
-        let sortedKids = kids.sorted { (frame(of: $0)?.minX ?? 0) < (frame(of: $1)?.minX ?? 0) }
-        let sortedGroup = group.sorted { $0.x < $1.x }
-        let idx = sortedGroup.firstIndex { $0.id == entry.id } ?? 0
-        return sortedKids[min(idx, sortedKids.count - 1)]
-    }
-
-    /// CFArray → [AXUIElement]（避免 Swift 泛型橋接靜默失敗）
-    private static func children(of el: AXUIElement) -> [AXUIElement] {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &ref) == .success,
-              let any = ref, CFGetTypeID(any) == CFArrayGetTypeID() else { return [] }
-        let cf = any as! CFArray
-        var out: [AXUIElement] = []
-        for i in 0..<CFArrayGetCount(cf) {
-            out.append(unsafeBitCast(CFArrayGetValueAtIndex(cf, i), to: AXUIElement.self))
+    private static func currentBounds(windowID: Int) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
         }
-        return out
-    }
-
-    private static func frame(of el: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?, sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let p = posRef, CFGetTypeID(p) == AXValueGetTypeID(),
-              let s = sizeRef, CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
-        var pt = CGPoint.zero, sz = CGSize.zero
-        AXValueGetValue(p as! AXValue, .cgPoint, &pt)
-        AXValueGetValue(s as! AXValue, .cgSize, &sz)
-        return CGRect(origin: pt, size: sz)
+        for w in list where (w[kCGWindowNumber as String] as? Int) == windowID {
+            if let d = w[kCGWindowBounds as String] as? NSDictionary,
+               let r = CGRect(dictionaryRepresentation: d) {
+                return r
+            }
+        }
+        return nil
     }
 
     /// AX 座標 x 軸與 NSScreen 全域座標一致，只需驗 x
@@ -216,20 +181,15 @@ final class FloatBar {
         close()
         guard let owner else { return }
         guard AXPresser.trusted else {
-            // 未授權：退而求其次，展開真實選單列讓使用者直接點
-            owner.setCollapsed(false, byHover: true)
+            // 未授權：明確引導授權，不做令人困惑的靜默降級
+            Toast.show(L.floatNeedAX.s)
+            AXPresser.promptForPermission()
             return
         }
-        let group = all.filter { $0.pid == e.pid }
         if owner.collapsed {
-            // 先展開讓圖示回到畫面上（用一般自動收合節奏，留時間操作對方選單）
-            owner.setCollapsed(false)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                AXPresser.trigger(entry: e, groupOfSamePid: group)
-            }
-        } else {
-            AXPresser.trigger(entry: e, groupOfSamePid: group)
+            owner.setCollapsed(false) // 展開讓圖示回到畫面上（自動收合會稍後收回）
         }
+        AXPresser.clickStatusWindow(windowID: e.id) // 座標就位的瞬間立即代點
     }
 }
 
