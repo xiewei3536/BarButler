@@ -94,7 +94,7 @@ PLIST
 
 # 簽名身分:CI 以 SIGN_ID 傳入固定自簽憑證（保住輔助使用授權）；本機預設 ad-hoc
 SIGN_ID="${SIGN_ID:--}"
-echo "▸ 簽名（identity: $SIGN_ID）…"
+echo "▸ 簽名（identity: ${SIGN_ID}）…"
 codesign --force -s "$SIGN_ID" "$FRAMEWORKS/Sparkle.framework"
 codesign --force --deep -s "$SIGN_ID" "$BUNDLE"
 codesign --verify --deep "$BUNDLE" && echo "  簽名驗證通過"
