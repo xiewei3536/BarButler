@@ -13,14 +13,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Import signing certificate
+        env:
+          P12_BASE64: ${{ secrets.CODESIGN_P12_BASE64 }}
+          P12_PWD: ${{ secrets.CODESIGN_PWD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${P12_BASE64:-}" ]; then
+            echo "未設定 CODESIGN_P12_BASE64，改用 ad-hoc 簽名"
+            echo "SIGN_ID=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "SIGN_ID=BarButler Self-Sign" >> "$GITHUB_ENV"
+          echo "$P12_BASE64" | base64 -d > /tmp/sign.p12
+          security create-keychain -p ci-pass build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci-pass build.keychain
+          security set-keychain-settings build.keychain
+          security import /tmp/sign.p12 -k build.keychain -P "$P12_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci-pass build.keychain >/dev/null
+          security find-certificate -c "BarButler Self-Sign" -p build.keychain > /tmp/cert.pem
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /tmp/cert.pem
+          rm -f /tmp/sign.p12
+
       - name: Build universal .app + .dmg
-        run: VERSION="${GITHUB_REF_NAME#v}" bash build.sh
+        run: VERSION="${GITHUB_REF_NAME#v}" SIGN_ID="${SIGN_ID:--}" bash build.sh
 
       - name: Sign update (Sparkle EdDSA)
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${SPARKLE_PRIVATE_KEY:-}" ]; then
+            echo "未設定 SPARKLE_PRIVATE_KEY，略過 appcast（僅發佈 Release，自動更新待補）"
+            echo "APPCAST=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "APPCAST=1" >> "$GITHUB_ENV"
           umask 077
           echo "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_key
           SIGN_TOOL=$(find .build/artifacts -type f -name sign_update -path "*/bin/*" | head -1)
@@ -29,6 +58,7 @@ jobs:
           echo "SIGNATURE=$SIGNATURE" >> "$GITHUB_ENV"
 
       - name: Generate appcast.xml
+        if: env.APPCAST == '1'
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -67,6 +97,7 @@ jobs:
             Existing users will receive this update automatically in-app.
 
       - name: Push appcast.xml to main
+        if: env.APPCAST == '1'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"

@@ -54,34 +54,83 @@ enum AXPresser {
         _ = AXIsProcessTrustedWithOptions(opts)
     }
 
-    /// 觸發該 App 的第 idx 個（依 X 排序）狀態列項目
-    static func press(entry: HiddenEntry, groupOfSamePid group: [HiddenEntry]) {
+    /// 觸發該 App 的狀態列圖示：等圖示真正出現在畫面上，對其中心送出「合成滑鼠點擊」
+    /// （與親手點擊等效，選單／彈窗一定會開）；圖示始終不在畫面上時退回 AXPress。
+    static func trigger(entry: HiddenEntry, groupOfSamePid group: [HiddenEntry]) {
+        guard let el = element(for: entry, group: group) else { return }
+        attemptClick(el, attemptsLeft: 10)
+    }
+
+    private static func attemptClick(_ el: AXUIElement, attemptsLeft: Int) {
+        if let f = frame(of: el), f.width > 0, xOnSomeScreen(f.midX) {
+            syntheticClick(at: CGPoint(x: f.midX, y: f.midY))
+            return
+        }
+        guard attemptsLeft > 0 else {
+            AXUIElementPerformAction(el, kAXPressAction as CFString) // 最後手段
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            attemptClick(el, attemptsLeft: attemptsLeft - 1)
+        }
+    }
+
+    private static func element(for entry: HiddenEntry, group: [HiddenEntry]) -> AXUIElement? {
         let appEl = AXUIElementCreateApplication(entry.pid)
         var extrasRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appEl, "AXExtrasMenuBar" as CFString, &extrasRef) == .success,
               let extrasAny = extrasRef, CFGetTypeID(extrasAny) == AXUIElementGetTypeID()
-        else { return }
-        let extras = extrasAny as! AXUIElement
-
-        var kidsRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(extras, kAXChildrenAttribute as CFString, &kidsRef)
-        guard let kids = kidsRef as? [AXUIElement], !kids.isEmpty else { return }
-
-        func xOf(_ el: AXUIElement) -> CGFloat {
-            var ref: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &ref) == .success,
-                  let any = ref, CFGetTypeID(any) == AXValueGetTypeID() else { return 0 }
-            var pt = CGPoint.zero
-            AXValueGetValue(any as! AXValue, .cgPoint, &pt)
-            return pt.x
-        }
+        else { return nil }
+        let kids = children(of: extrasAny as! AXUIElement)
+        guard !kids.isEmpty else { return nil }
 
         // 同一 App 有多個圖示時，用「由左至右的序位」對應
-        let sortedKids = kids.sorted { xOf($0) < xOf($1) }
+        let sortedKids = kids.sorted { (frame(of: $0)?.minX ?? 0) < (frame(of: $1)?.minX ?? 0) }
         let sortedGroup = group.sorted { $0.x < $1.x }
         let idx = sortedGroup.firstIndex { $0.id == entry.id } ?? 0
-        let target = sortedKids[min(idx, sortedKids.count - 1)]
-        AXUIElementPerformAction(target, kAXPressAction as CFString)
+        return sortedKids[min(idx, sortedKids.count - 1)]
+    }
+
+    /// CFArray → [AXUIElement]（避免 Swift 泛型橋接靜默失敗）
+    private static func children(of el: AXUIElement) -> [AXUIElement] {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &ref) == .success,
+              let any = ref, CFGetTypeID(any) == CFArrayGetTypeID() else { return [] }
+        let cf = any as! CFArray
+        var out: [AXUIElement] = []
+        for i in 0..<CFArrayGetCount(cf) {
+            out.append(unsafeBitCast(CFArrayGetValueAtIndex(cf, i), to: AXUIElement.self))
+        }
+        return out
+    }
+
+    private static func frame(of el: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?, sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let p = posRef, CFGetTypeID(p) == AXValueGetTypeID(),
+              let s = sizeRef, CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+        var pt = CGPoint.zero, sz = CGSize.zero
+        AXValueGetValue(p as! AXValue, .cgPoint, &pt)
+        AXValueGetValue(s as! AXValue, .cgSize, &sz)
+        return CGRect(origin: pt, size: sz)
+    }
+
+    /// AX 座標 x 軸與 NSScreen 全域座標一致，只需驗 x
+    private static func xOnSomeScreen(_ x: CGFloat) -> Bool {
+        NSScreen.screens.contains { x >= $0.frame.minX && x <= $0.frame.maxX }
+    }
+
+    private static func syntheticClick(at p: CGPoint) {
+        let src = CGEventSource(stateID: .hidSystemState)
+        let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown,
+                           mouseCursorPosition: p, mouseButton: .left)
+        let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp,
+                         mouseCursorPosition: p, mouseButton: .left)
+        down?.post(tap: .cghidEventTap)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            up?.post(tap: .cghidEventTap)
+        }
     }
 }
 
@@ -173,13 +222,13 @@ final class FloatBar {
         }
         let group = all.filter { $0.pid == e.pid }
         if owner.collapsed {
-            // 先短暫展開讓對方的選單／視窗有正確的錨點，稍後自動收回
-            owner.setCollapsed(false, byHover: true)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                AXPresser.press(entry: e, groupOfSamePid: group)
+            // 先展開讓圖示回到畫面上（用一般自動收合節奏，留時間操作對方選單）
+            owner.setCollapsed(false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                AXPresser.trigger(entry: e, groupOfSamePid: group)
             }
         } else {
-            AXPresser.press(entry: e, groupOfSamePid: group)
+            AXPresser.trigger(entry: e, groupOfSamePid: group)
         }
     }
 }
