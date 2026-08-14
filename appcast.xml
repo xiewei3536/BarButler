@@ -2,6 +2,14 @@
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
     <title>BarButler</title>
-    <!-- 由 GitHub Actions 於每次發佈時自動更新 -->
+    <item>
+      <title>Version 1.2.0</title>
+      <pubDate>Fri, 14 Aug 2026 08:53:47 +0000</pubDate>
+      <sparkle:version>1.2.0</sparkle:version>
+      <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/xiewei3536/BarButler</link>
+      <enclosure url="https://github.com/xiewei3536/BarButler/releases/download/v1.2.0/BarButler.dmg" sparkle:edSignature="JvnTAytCMr0BTRqX/gweuU5lhIxA7D3XTwIeVcn41/W32EYoPaD6vRZweih0bBg9bjPV8jPYvTBWoWhd28UgBw==" length="3007827" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
