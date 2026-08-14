@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>BarButler</title>
+    <!-- 由 GitHub Actions 於每次發佈時自動更新 -->
+  </channel>
+</rss>

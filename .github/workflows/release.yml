@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal .app + .dmg
+        run: VERSION="${GITHUB_REF_NAME#v}" bash build.sh
+
+      - name: Sign update (Sparkle EdDSA)
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          echo "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_key
+          SIGN_TOOL=$(find .build/artifacts -type f -name sign_update -path "*/bin/*" | head -1)
+          SIGNATURE=$("$SIGN_TOOL" --ed-key-file /tmp/sparkle_key dist/BarButler.dmg)
+          rm -f /tmp/sparkle_key
+          echo "SIGNATURE=$SIGNATURE" >> "$GITHUB_ENV"
+
+      - name: Generate appcast.xml
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/BarButler.dmg"
+          DATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
+          cat > /tmp/appcast.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>BarButler</title>
+              <item>
+                <title>Version ${VERSION}</title>
+                <pubDate>${DATE}</pubDate>
+                <sparkle:version>${VERSION}</sparkle:version>
+                <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+                <link>https://github.com/${GITHUB_REPOSITORY}</link>
+                <enclosure url="${URL}" ${SIGNATURE} type="application/octet-stream"/>
+              </item>
+            </channel>
+          </rss>
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: BarButler ${{ github.ref_name }}
+          files: dist/BarButler.dmg
+          body: |
+            **BarButler ${{ github.ref_name }}** — Universal (Intel & Apple Silicon), macOS 13+
+
+            首次安裝提示／First-run note:
+            由於未經 Apple 公證，首次開啟請「右鍵 → 打開」。
+            Unsigned build — right-click the app and choose "Open" on first launch.
+            已安裝的用戶會透過 App 內建的自動更新收到本次更新。
+            Existing users will receive this update automatically in-app.
+
+      - name: Push appcast.xml to main
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+          cp /tmp/appcast.xml appcast.xml
+          git add appcast.xml
+          git commit -m "appcast: ${GITHUB_REF_NAME}" || echo "no changes"
+          git push origin main
