@@ -269,7 +269,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private func apply() {
         if let b = toggleItem.button {
             b.image = Self.symbol(IconStyleKit.symbolName(style: prefs.iconStyle, collapsed: collapsed))
-            b.toolTip = prefs.isFloatMode ? L.tooltipFloat.s : L.tooltipMenubar.s
+            let tip = prefs.isFloatMode ? L.tooltipFloat.s : L.tooltipMenubar.s
+            if b.toolTip != tip { b.toolTip = tip }
         }
         if collapsed {
             pusher.length = Self.hugeWidth
@@ -549,6 +550,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         hoverWork?.cancel()
         let w = DispatchWorkItem { [weak self] in
             guard let s = self, s.prefs.hoverToExpand else { return }
+            // 觸發當下再確認滑鼠真的還停在 ‹ 上：路過不誤觸，也不受 AppKit 偶發的瞬間 exit 雜訊影響
+            guard let f = s.arrowScreenFrame, f.insetBy(dx: -4, dy: -4).contains(NSEvent.mouseLocation) else { return }
             if s.prefs.isFloatMode {
                 if !s.floatBar.isOpen, s.collapsed { s.floatBar.open(byHover: true) }
             } else if s.collapsed {
@@ -556,12 +559,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             }
         }
         hoverWork = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: w) // 短暫停留才算懸停，路過不誤觸
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: w) // 短暫停留才算懸停
     }
 
     @objc(mouseExited:) func mouseExited(_ event: NSEvent) {
         Log.core.info("mouseExited")
-        hoverWork?.cancel()
+        // 不在此取消 hoverWork（由觸發時的位置檢查決定）；只負責安排收合
         if !collapsed, expandReason == .hover { scheduleCollapse(after: 2.0) }
     }
 
