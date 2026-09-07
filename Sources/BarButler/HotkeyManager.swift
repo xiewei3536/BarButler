@@ -8,8 +8,10 @@ final class HotkeyManager {
 
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
+    private var last: (keyCode: Int, mods: UInt, enabled: Bool)?
 
     func register(keyCode: Int, modifiersRaw: UInt, enabled: Bool) {
+        last = (keyCode, modifiersRaw, enabled)
         unregister()
         guard enabled else { return }
         installHandlerIfNeeded()
@@ -20,11 +22,18 @@ final class HotkeyManager {
         if flags.contains(.control) { carbon |= UInt32(controlKey) }
         if flags.contains(.shift)   { carbon |= UInt32(shiftKey) }
         let hkID = EventHotKeyID(signature: OSType(0x42425448), id: 1) // 'BBTH'
-        RegisterEventHotKey(UInt32(keyCode), carbon, hkID, GetEventDispatcherTarget(), 0, &hotKeyRef)
+        let st = RegisterEventHotKey(UInt32(keyCode), carbon, hkID, GetEventDispatcherTarget(), 0, &hotKeyRef)
+        Log.hotkey.info("register keyCode=\(keyCode) mods=\(modifiersRaw) status=\(st)")
     }
 
     func unregister() {
         if let r = hotKeyRef { UnregisterEventHotKey(r); hotKeyRef = nil }
+    }
+
+    /// 錄製新組合鍵期間暫停，避免按到現有快捷鍵時觸發
+    func pause() { unregister() }
+    func resume() {
+        if let l = last { register(keyCode: l.keyCode, modifiersRaw: l.mods, enabled: l.enabled) }
     }
 
     private func installHandlerIfNeeded() {
@@ -33,6 +42,7 @@ final class HotkeyManager {
         InstallEventHandler(GetEventDispatcherTarget(), { _, _, userData -> OSStatus in
             guard let userData else { return noErr }
             let mgr = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
+            Log.hotkey.info("hotkey fired")
             DispatchQueue.main.async { mgr.onTrigger?() }
             return noErr
         }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handlerRef)

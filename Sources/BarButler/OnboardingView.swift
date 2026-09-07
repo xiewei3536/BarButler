@@ -1,23 +1,26 @@
 import SwiftUI
 import AppKit
+import ServiceManagement
 
-/// 新手教學：含動態模擬選單列
+/// 新手教學：含動態模擬選單列（會依目前設定的模式演示）
 struct OnboardingView: View {
     @EnvironmentObject var prefs: Prefs
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            MockMenuBar()
+            MockMenuBar(mode: prefs.clickMode, iconStyle: prefs.iconStyle)
                 .padding(.horizontal, 32)
-                .padding(.top, 22)
+                .padding(.top, 20)
             steps
                 .padding(.horizontal, 36)
-                .padding(.top, 22)
-            Spacer(minLength: 12)
+                .padding(.top, 8)
+            Spacer(minLength: 10)
             footer
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 620, height: 600)
+        .background(VisualEffectBackground().ignoresSafeArea())
         .id(prefs.language)
     }
 
@@ -35,23 +38,34 @@ struct OnboardingView: View {
             Text(L.obTitle.s).font(.system(size: 22, weight: .bold))
             Text(L.obSubtitle.s).font(.system(size: 13)).foregroundStyle(.secondary)
         }
-        .padding(.top, 40)
+        .padding(.top, 38)
     }
 
     private var steps: some View {
-        VStack(spacing: 14) {
-            StepRow(n: 1, icon: "command", title: L.obStep1T.s, desc: L.obStep1D.s)
-            StepRow(n: 2, icon: "cursorarrow.click.2", title: L.obStep2T.s, desc: L.obStep2D.s)
-            StepRow(n: 3, icon: "sparkles", title: L.obStep3T.s, desc: L.obStep3D.s)
+        VStack(spacing: 12) {
+            StepRow(icon: "command", title: L.obStep1T.s, desc: L.obStep1D.s)
+            StepRow(icon: "cursorarrow.click.2", title: L.obStep2T.s, desc: L.obStep2D.s)
+            StepRow(icon: "sparkles", title: L.obStep3T.s, desc: L.obStep3D.s)
         }
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 14) {
+            Toggle(isOn: $launchAtLogin) {
+                Text(L.obLaunch.s).font(.system(size: 12))
+            }
+            .toggleStyle(.checkbox)
+            .onChange(of: launchAtLogin) { on in
+                do {
+                    if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+                } catch {
+                    launchAtLogin = SMAppService.mainApp.status == .enabled
+                }
+            }
             Button(L.obSettings.s) {
                 NotificationCenter.default.post(name: .bbShowSettings, object: nil)
             }
-            .controlSize(.large)
+            .controlSize(.regular)
             Spacer()
             Button {
                 (NSApp.delegate as? AppDelegate)?.closeOnboarding()
@@ -68,12 +82,11 @@ struct OnboardingView: View {
             .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, 32)
-        .padding(.bottom, 26)
+        .padding(.bottom, 24)
     }
 }
 
 private struct StepRow: View {
-    let n: Int
     let icon: String
     let title: String
     let desc: String
@@ -98,23 +111,46 @@ private struct StepRow: View {
     }
 }
 
-/// 會自己收合／展開的模擬選單列
+/// 會自己展開／收合的模擬選單列；懸浮面板模式時改演示下方彈出面板
 struct MockMenuBar: View {
-    @State private var collapsed = false
+    var mode: String = "menubar"
+    var iconStyle: String = "chevron"
+    @State private var open = false
     private let hideable = ["message.fill", "cloud.fill", "music.note", "camera.fill"]
 
     var body: some View {
+        ZStack(alignment: .topTrailing) {
+            bar
+            if mode == "float", open {
+                panelMock
+                    .padding(.top, 38)
+                    .padding(.trailing, 58)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .frame(height: 88, alignment: .top)
+        .task(id: mode) {
+            open = false
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_900_000_000)
+                if Task.isCancelled { break }
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { open.toggle() }
+            }
+        }
+    }
+
+    private var bar: some View {
         HStack(spacing: 13) {
             Image(systemName: "apple.logo").font(.system(size: 12))
             Text("Finder").font(.system(size: 12, weight: .semibold))
             Spacer()
-            if !collapsed {
+            if mode == "menubar", open {
                 ForEach(hideable, id: \.self) { ic in
                     Image(systemName: ic)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            Image(systemName: collapsed ? "chevron.right" : "chevron.left")
+            Image(systemName: IconStyleKit.symbolName(style: iconStyle, collapsed: !open))
                 .font(.system(size: 11, weight: .bold))
             Image(systemName: "wifi")
             Image(systemName: "battery.100")
@@ -130,13 +166,21 @@ struct MockMenuBar: View {
                                      startPoint: .top, endPoint: .bottom))
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
         )
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
-                    collapsed.toggle()
-                }
+    }
+
+    private var panelMock: some View {
+        HStack(spacing: 12) {
+            ForEach(hideable, id: \.self) { ic in
+                Image(systemName: ic).font(.system(size: 13))
             }
         }
+        .foregroundStyle(.white.opacity(0.92))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color(white: 0.2))
+                .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+        )
     }
 }

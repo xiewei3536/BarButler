@@ -1,13 +1,28 @@
 import AppKit
 import Combine
+import ServiceManagement
+
+/// 展開的原因 → 決定自動收合的節奏
+enum ExpandReason { case click, hover, forward, peek, other }
+
+enum IconStyleKit {
+    static func symbolName(style: String, collapsed: Bool) -> String {
+        switch style {
+        case "dots":   return collapsed ? "ellipsis.circle.fill" : "ellipsis.circle"
+        case "arrows": return collapsed ? "arrow.right.to.line.compact" : "arrow.left.to.line.compact"
+        default:       return collapsed ? "chevron.right" : "chevron.left"
+        }
+    }
+}
 
 /// 核心：使用者看得到的只有一個 ‹（toggle）。
 ///   [永久隱藏區…] ▏alwaysSep（選用）  [要收合的圖示…]  ▏pusher（1px 隱形）  ‹ toggle  [永遠顯示…]
-/// 收合時把 pusher 的 length 撐到 10000，把它左邊的圖示全部擠出畫面（v1.0 驗證過的機制）。
-/// pusher 永遠自動黏在 ‹ 左側、無圖示、不可點擊、1px 寬幾乎不可能被拖到——單圖示外觀 + 穩定機制。
+/// 收合時把 pusher 的 length 撐到 10000，把它左邊的圖示全部擠出畫面。
+/// pusher 永遠自動黏在 ‹ 左側、無圖示、不可點擊——單圖示外觀 + 穩定機制。
 final class StatusBarController: NSObject, NSMenuDelegate {
     static let toggleWidth: CGFloat = 24
     static let pusherIdle: CGFloat = 1
+    static let pusherBoundary: CGFloat = 9
     static let sepWidth: CGFloat = 10
     static let hugeWidth: CGFloat = 10000
 
@@ -26,9 +41,15 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var collapseTimer: Timer?
     private var peeking = false
     private var alwaysRevealed = false
-    private var hoverDidExpand = false
+    private var expandReason: ExpandReason = .other
     private var isAdjusting = false
     private var validateWork: DispatchWorkItem?
+    private var hoverWork: DispatchWorkItem?
+    private var boundaryVisible = false
+    private var clickAwayMonitor: Any?
+    private var dragMonitors: [Any] = []
+    private var forwardPending = false
+    private var lastForwardTime = Date.distantPast
     private var cancellables = Set<AnyCancellable>()
 
     private(set) var collapsed: Bool
@@ -44,23 +65,26 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         migratePositionSchema()
         buildItems()
         apply()
-        refreshLocalization()
         observePositionDefaults()
+        installDragMonitors()
+
         // 啟動後複查一次 pusher 是否貼緊 ‹（等版面穩定再驗）
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let s = self, !s.collapsed else { return }
             s.syncPusher()
         }
 
-        prefs.$alwaysHiddenEnabled.dropFirst()
-            .sink { [weak self] _ in DispatchQueue.main.async { self?.apply() } }
-            .store(in: &cancellables)
-        prefs.$language.dropFirst()
-            .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshLocalization() } }
+        let reapply: (Any) -> Void = { [weak self] _ in DispatchQueue.main.async { self?.apply() } }
+        prefs.$alwaysHiddenEnabled.dropFirst().sink(receiveValue: reapply).store(in: &cancellables)
+        prefs.$language.dropFirst().sink(receiveValue: reapply).store(in: &cancellables)
+        prefs.$iconStyle.dropFirst().sink(receiveValue: reapply).store(in: &cancellables)
+        prefs.$clickAwayCollapse.dropFirst().sink(receiveValue: reapply).store(in: &cancellables)
+        prefs.$clickMode.dropFirst()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.floatBar.close(); self?.apply() } }
             .store(in: &cancellables)
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil, queue: .main) { [weak self] _ in self?.apply() }
+            object: nil, queue: .main) { [weak self] _ in self?.refreshAfterWake() }
     }
 
     // MARK: - 位置鍵
@@ -82,7 +106,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             }
             d.set(true, forKey: "posSchemaV2")
         }
-        // ‹ 預設在最右側（緊鄰系統圖示），不會被 macOS 的空間不足機制擠掉
         if position("BB_Toggle") == nil {
             d.set(1.0, forKey: Self.posKey("BB_Toggle"))
         }
@@ -101,6 +124,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             b.target = self
             b.action = #selector(toggleClicked(_:))
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            b.setAccessibilityLabel("BarButler")
             b.addTrackingArea(NSTrackingArea(rect: .zero,
                 options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                 owner: self, userInfo: nil))
@@ -131,11 +155,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return Double(screen.frame.maxX - w.frame.minX)
     }
 
-    /// 真相來源：用視窗實際位置判斷 pusher 是否緊貼 ‹ 左側
+    /// 真相來源：pusher 必須在 ‹「左側」且緊貼（方向性檢查，避免 ‹ 被拖到 pusher 左邊而不知）
     private var pusherAdjacent: Bool {
         guard let tw = toggleItem.button?.window,
               let pw = pusher.button?.window else { return false }
-        return abs(pw.frame.maxX - tw.frame.minX) <= 30
+        let gap = tw.frame.minX - pw.frame.maxX
+        return gap >= -2 && gap <= 30
     }
 
     /// 確保 pusher 就位後再執行後續動作（收合前必經）
@@ -147,12 +172,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let s = self else { return }
             if !s.pusherAdjacent, let g = s.toggleGeometryDistance {
-                // 位置紀錄不可信時退回幾何換算，再試一次
                 UserDefaults.standard.set(g + 0.5, forKey: Self.posKey("BB_Pusher"))
                 s.buildPusher()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 s.isAdjusting = false
+                s.apply()
                 completion?()
             }
         }
@@ -165,7 +190,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         pusher = nil
         buildItems()
         apply()
-        refreshLocalization()
     }
 
     // MARK: - 位置守衛
@@ -188,22 +212,35 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     private func validatePositions() {
         guard !isAdjusting, !collapsed else { return } // 收合中版面浮動，不校正
-        // 使用者拖動 ‹ 後，pusher 自動跟上（以實際幾何位置為準）
-        if !pusherAdjacent {
-            syncPusher { [weak self] in self?.apply() }
+        if !pusherAdjacent {                         // 使用者拖動了 ‹ → pusher 自動跟上
+            syncPusher()
             return
         }
-        // 永久隱藏區分隔線必須在 ‹（含 pusher）左側
-        if prefs.alwaysHiddenEnabled,
-           let t = position("BB_Toggle"),
-           let a = position("BB_AlwaysSep"), a <= t + 0.5 {
-            heal()
+        // 永久隱藏區分隔線必須在 ‹ 左側
+        if prefs.alwaysHiddenEnabled, alwaysSep.isVisible,
+           let tw = toggleItem.button?.window, let aw = alwaysSep.button?.window,
+           aw.frame.minX > tw.frame.minX {
+            healAlwaysSep()
         }
     }
 
-    /// 大修復：清掉所有位置紀錄重排（‹ 回最右側），展開並提示
+    /// 只修永久隱藏區分隔線：移到 ‹ 左側，不動 ‹ 的位置
+    private func healAlwaysSep() {
+        guard !isAdjusting else { return }
+        isAdjusting = true
+        bar.removeStatusItem(alwaysSep)
+        UserDefaults.standard.set((position("BB_Toggle") ?? 1.0) + 80, forKey: Self.posKey("BB_AlwaysSep"))
+        alwaysSep = bar.statusItem(withLength: Self.hugeWidth)
+        alwaysSep.autosaveName = "BB_AlwaysSep"
+        apply()
+        Toast.show(L.toastFixed.s, kind: .info, near: arrowScreenFrame)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.isAdjusting = false }
+    }
+
+    /// 大修復：‹ 被擠出畫面 → 清掉所有位置紀錄重排（‹ 回最右側），展開並提示
     private func heal() {
         guard !isAdjusting else { return }
+        Log.core.error("‹ off-screen → heal")
         isAdjusting = true
         let d = UserDefaults.standard
         for n in ["BB_Toggle", "BB_Pusher", "BB_AlwaysSep"] {
@@ -212,8 +249,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
         d.set(1.0, forKey: Self.posKey("BB_Toggle"))
         rebuildItems()
-        setCollapsed(false)
-        Toast.show(L.toastFixed.s)
+        reallySetCollapsed(false, reason: .other)
+        Toast.show(L.toastHealed.s, kind: .warning, near: arrowScreenFrame)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.isAdjusting = false }
     }
 
@@ -230,9 +267,21 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // MARK: - 狀態套用
 
     private func apply() {
-        toggleItem.button?.image = Self.symbol(collapsed ? "chevron.right" : "chevron.left")
-        pusher.length = collapsed ? Self.hugeWidth : Self.pusherIdle
-        if collapsed { scheduleOffscreenCheck() }
+        if let b = toggleItem.button {
+            b.image = Self.symbol(IconStyleKit.symbolName(style: prefs.iconStyle, collapsed: collapsed))
+            b.toolTip = prefs.isFloatMode ? L.tooltipFloat.s : L.tooltipMenubar.s
+        }
+        if collapsed {
+            pusher.length = Self.hugeWidth
+            pusher.button?.image = nil
+            scheduleOffscreenCheck()
+        } else if boundaryVisible {
+            pusher.length = Self.pusherBoundary
+            pusher.button?.image = Self.separatorImage(alpha: 0.6)
+        } else {
+            pusher.length = Self.pusherIdle
+            pusher.button?.image = nil
+        }
 
         let alwaysOn = prefs.alwaysHiddenEnabled
         alwaysSep.isVisible = alwaysOn
@@ -241,44 +290,55 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             alwaysSep.length = show ? Self.sepWidth : Self.hugeWidth
             alwaysSep.button?.image = show ? Self.separatorImage(alpha: 0.5) : nil
         }
+        updateClickAwayMonitor()
     }
 
-    func refreshLocalization() {
-        toggleItem.button?.toolTip = L.tooltip.s
+    func refreshAfterWake() {
+        apply()
+        if !collapsed { syncPusher() }
     }
 
     // MARK: - 收合／展開
 
-    func setCollapsed(_ c: Bool, byHover: Bool = false) {
+    func setCollapsed(_ c: Bool, reason: ExpandReason = .click) {
         // 收合前先確保 pusher 貼緊 ‹，才會把正確的區塊藏起來
         if c, !collapsed, !pusherAdjacent {
-            syncPusher { [weak self] in self?.reallySetCollapsed(true, byHover: byHover) }
+            syncPusher { [weak self] in self?.reallySetCollapsed(true, reason: reason) }
             return
         }
-        reallySetCollapsed(c, byHover: byHover)
+        reallySetCollapsed(c, reason: reason)
     }
 
-    private func reallySetCollapsed(_ c: Bool, byHover: Bool) {
-        if peeking { peeking = false }
+    private func reallySetCollapsed(_ c: Bool, reason: ExpandReason) {
+        Log.core.info("setCollapsed \(c) reason=\(String(describing: reason))")
+        peeking = false
+        hoverWork?.cancel()
         collapsed = c
         prefs.collapsed = c
         if c {
             alwaysRevealed = false
-            hoverDidExpand = false
+            boundaryVisible = false
+            expandReason = .other
             cancelTimer()
+            apply()
+            maybeShowCollapseHint()
         } else {
-            hoverDidExpand = byHover
+            expandReason = reason
+            apply()
             scheduleCollapse()
         }
-        apply()
     }
 
-    func toggle() { setCollapsed(!collapsed) }
+    func toggle() { setCollapsed(!collapsed, reason: .click) }
+    func hide() { if !collapsed { setCollapsed(true) } }
+    func show() { if collapsed { setCollapsed(false, reason: .click) } }
 
     /// 主要進入點（左鍵／快捷鍵）：依使用者選擇的模式行動
     func activate() {
-        if prefs.clickMode == "float" {
-            floatBar.toggle()
+        Log.core.info("activate float=\(self.prefs.isFloatMode) collapsed=\(self.collapsed)")
+        if prefs.isFloatMode {
+            if !collapsed && !floatBar.isOpen { setCollapsed(true) } // 已展開時點 ‹ = 收合
+            else { floatBar.toggle() }
         } else {
             toggle()
         }
@@ -287,7 +347,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private func toggleAlwaysRevealed() {
         guard prefs.alwaysHiddenEnabled else { toggle(); return }
         if collapsed {
-            setCollapsed(false)
+            setCollapsed(false, reason: .click)
             alwaysRevealed = true
         } else {
             alwaysRevealed.toggle()
@@ -303,6 +363,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let restoreCollapsed = collapsed
         let restoreRevealed = alwaysRevealed
         collapsed = false
+        expandReason = .peek
         cancelTimer()
         apply()
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
@@ -310,17 +371,42 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             s.peeking = false
             s.collapsed = restoreCollapsed
             s.alwaysRevealed = restoreRevealed
+            s.expandReason = .other
             s.apply()
             if !s.collapsed { s.scheduleCollapse() }
         }
     }
 
+    // MARK: - 面板代點（FloatBar 呼叫）
+
+    func beginForward() {
+        lastForwardTime = Date()
+        forwardPending = true
+        if collapsed { setCollapsed(false, reason: .forward) } else { expandReason = .forward }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in self?.endForward() } // 安全網
+    }
+
+    func endForward() {
+        guard forwardPending else { return }
+        forwardPending = false
+        if !collapsed { scheduleCollapse(after: 1.0) }
+    }
+
     // MARK: - 自動收合
 
-    private func scheduleCollapse(short: Bool = false) {
+    private func scheduleCollapse(after override: TimeInterval? = nil) {
         cancelTimer()
-        var interval = TimeInterval(prefs.autoCollapseSeconds)
-        if hoverDidExpand { interval = short ? 2.5 : max(4, min(interval == 0 ? 6 : interval, 8)) }
+        let base = TimeInterval(prefs.autoCollapseSeconds)
+        let interval: TimeInterval
+        if let o = override {
+            interval = o
+        } else {
+            switch expandReason {
+            case .hover:   interval = base == 0 ? 4 : min(max(base, 3), 6)
+            case .forward: interval = 1.2
+            default:       interval = base
+            }
+        }
         guard interval > 0 else { return }
         collapseTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             self?.attemptCollapse()
@@ -328,13 +414,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func attemptCollapse() {
-        guard !collapsed else { return }
-        if mouseInMenuBar || NSEvent.modifierFlags.contains(.command) {
-            // 使用者還在選單列上或按著 ⌘ 整理圖示：每 2 秒快速重查，一離開就收
-            cancelTimer()
-            collapseTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
-                self?.attemptCollapse()
-            }
+        guard !collapsed, !peeking else { return }
+        let busy = forwardPending || boundaryVisible || isStatusItemUIOpen
+            || NSEvent.modifierFlags.contains(.command) || mouseInMenuBar
+        Log.core.debug("attemptCollapse busy=\(busy)")
+        if busy {
+            scheduleCollapse(after: expandReason == .forward ? 0.6 : 1.5) // 稍後再試，一有空就收
         } else {
             setCollapsed(true)
         }
@@ -345,18 +430,108 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         collapseTimer = nil
     }
 
-    private var mouseInMenuBar: Bool {
-        let loc = NSEvent.mouseLocation
-        for s in NSScreen.screens {
-            let f = s.frame
-            if loc.x >= f.minX, loc.x <= f.maxX, loc.y >= f.maxY - 26, loc.y <= f.maxY { return true }
+    private var mouseInMenuBar: Bool { ScreenGeometry.pointInMenuBar(NSEvent.mouseLocation) }
+
+    /// 有任何選單、或貼在選單列下方的彈出視窗開著（使用者正在跟某個狀態列圖示互動）
+    var isStatusItemUIOpen: Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return false }
+        let menuLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
+        let anchoredLevels: Set<Int> = [Int(CGWindowLevelForKey(.floatingWindow)),
+                                        Int(CGWindowLevelForKey(.statusWindow)),
+                                        Int(CGWindowLevelForKey(.modalPanelWindow))]
+        let myPid = Int(ProcessInfo.processInfo.processIdentifier)
+        let bands = ScreenGeometry.menuBarBottomBandsCG()
+        for w in list {
+            guard let layer = w[kCGWindowLayer as String] as? Int, layer > 0,
+                  let bd = w[kCGWindowBounds as String] as? NSDictionary,
+                  let r = CGRect(dictionaryRepresentation: bd),
+                  r.width >= 40, r.height >= 24 else { continue }
+            if layer == menuLevel { return true }                       // 任何選單（含我們自己的）
+            guard (w[kCGWindowOwnerPID as String] as? Int) != myPid else { continue } // 我們的面板／提示不算
+            if anchoredLevels.contains(layer), r.height > 40,
+               bands.contains(where: { $0.contains(r.minY) }) { return true }
         }
         return false
+    }
+
+    // MARK: - 點擊他處即收合
+
+    private func updateClickAwayMonitor() {
+        let want = !collapsed && !peeking && prefs.clickAwayCollapse
+        if want, clickAwayMonitor == nil {
+            clickAwayMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                self?.handleGlobalClick()
+            }
+        } else if !want, let m = clickAwayMonitor {
+            NSEvent.removeMonitor(m)
+            clickAwayMonitor = nil
+        }
+    }
+
+    private func handleGlobalClick() {
+        guard !collapsed, !peeking, !forwardPending else { return }
+        guard Date().timeIntervalSince(lastForwardTime) > 1.5 else { return }
+        guard !mouseInMenuBar, !NSEvent.modifierFlags.contains(.command) else { return }
+        let hadUI = isStatusItemUIOpen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let s = self, !s.collapsed, !s.peeking else { return }
+            if s.isStatusItemUIOpen { return }             // 選單還開著（例如點進子選單）
+            if hadUI { s.scheduleCollapse(after: 0.8) }    // 剛關掉一個選單 → 稍後收
+            else { s.setCollapsed(true) }                  // 純粹點到別處 → 立即收
+        }
+    }
+
+    // MARK: - ⌘ 拖曳整理時顯示分界線
+
+    private func installDragMonitors() {
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDragged, handler: { [weak self] _ in self?.dragTick() }) {
+            dragMonitors.append(m)
+        }
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp, handler: { [weak self] _ in self?.dragEnded() }) {
+            dragMonitors.append(m)
+        }
+    }
+
+    private func dragTick() {
+        guard prefs.showBoundaryWhileArranging, !collapsed, !boundaryVisible else { return }
+        guard NSEvent.modifierFlags.contains(.command), mouseInMenuBar else { return }
+        boundaryVisible = true
+        cancelTimer()
+        apply()
+    }
+
+    private func dragEnded() {
+        guard boundaryVisible else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let s = self, s.boundaryVisible else { return }
+            s.boundaryVisible = false
+            s.apply()
+            s.scheduleCollapse()
+        }
+    }
+
+    // MARK: - 一次性提示
+
+    private func maybeShowCollapseHint() {
+        guard !(prefs.didShowHideTip && prefs.didShowEmptyTip) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let s = self, s.collapsed else { return }
+            let n = HiddenItemScanner.scan(leftOf: s.arrowScreenMinX ?? .greatestFiniteMagnitude).count
+            if n == 0, !s.prefs.didShowEmptyTip {
+                s.prefs.didShowEmptyTip = true
+                Toast.show(L.toastNothingHidden.s, kind: .info, near: s.arrowScreenFrame)
+            } else if n > 0, !s.prefs.didShowHideTip {
+                s.prefs.didShowHideTip = true
+                Toast.show(L.toastHiddenCount.f(n), kind: .success, near: s.arrowScreenFrame)
+            }
+        }
     }
 
     // MARK: - 點擊 / 懸停
 
     @objc private func toggleClicked(_ sender: Any?) {
+        hoverWork?.cancel()
         guard let ev = NSApp.currentEvent else { activate(); return }
         if ev.type == .rightMouseUp || ev.modifierFlags.contains(.control) {
             showMenu(); return
@@ -367,15 +542,27 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         activate()
     }
 
-    @objc func mouseEntered(with event: NSEvent) {
-        guard prefs.clickMode != "float" else { return } // 懸浮模式下懸停不動作
-        if prefs.hoverToExpand, collapsed, toggleItem.menu == nil {
-            setCollapsed(false, byHover: true)
+    // NSTrackingArea 呼叫的是 Objective-C 選擇器 mouseEntered: / mouseExited:，必須明確標註
+    @objc(mouseEntered:) func mouseEntered(_ event: NSEvent) {
+        Log.core.info("mouseEntered hover=\(self.prefs.hoverToExpand) collapsed=\(self.collapsed)")
+        guard prefs.hoverToExpand, toggleItem.menu == nil else { return }
+        hoverWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let s = self, s.prefs.hoverToExpand else { return }
+            if s.prefs.isFloatMode {
+                if !s.floatBar.isOpen, s.collapsed { s.floatBar.open(byHover: true) }
+            } else if s.collapsed {
+                s.setCollapsed(false, reason: .hover)
+            }
         }
+        hoverWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: w) // 短暫停留才算懸停，路過不誤觸
     }
 
-    @objc func mouseExited(with event: NSEvent) {
-        if hoverDidExpand, !collapsed { scheduleCollapse(short: true) }
+    @objc(mouseExited:) func mouseExited(_ event: NSEvent) {
+        Log.core.info("mouseExited")
+        hoverWork?.cancel()
+        if !collapsed, expandReason == .hover { scheduleCollapse(after: 2.0) }
     }
 
     // MARK: - 右鍵選單
@@ -389,6 +576,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         if prefs.alwaysHiddenEnabled {
             m.addItem(mi(alwaysRevealed ? L.menuHideAlways.s : L.menuRevealAlways.s, #selector(menuAlways)))
         }
+        m.addItem(.separator())
+        let fm = mi(L.menuFloatMode.s, #selector(menuToggleFloatMode))
+        fm.state = prefs.isFloatMode ? .on : .off
+        m.addItem(fm)
+        let li = mi(L.menuLoginItem.s, #selector(menuToggleLogin))
+        li.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        m.addItem(li)
         m.addItem(.separator())
         m.addItem(mi(L.menuHowTo.s, #selector(menuHowTo)))
         if UpdaterManager.shared.available {
@@ -420,6 +614,26 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func menuSettings() { NotificationCenter.default.post(name: .bbShowSettings, object: nil) }
     @objc private func menuQuit() { NSApp.terminate(nil) }
 
+    @objc private func menuToggleFloatMode() {
+        prefs.clickMode = prefs.isFloatMode ? "menubar" : "float"
+        let nowFloat = prefs.clickMode == "float"
+        Toast.show(nowFloat ? L.toastModeFloat.s : L.toastModeMenubar.s, kind: .info, near: arrowScreenFrame)
+    }
+
+    @objc private func menuToggleLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+                Toast.show(L.toastLoginOff.s, kind: .info, near: arrowScreenFrame)
+            } else {
+                try SMAppService.mainApp.register()
+                Toast.show(L.toastLoginOn.s, kind: .success, near: arrowScreenFrame)
+            }
+        } catch {
+            Toast.show("\(L.alertLoginFail.s): \(error.localizedDescription)", kind: .warning, near: arrowScreenFrame)
+        }
+    }
+
     // MARK: - 重設位置
 
     func resetPositions() {
@@ -429,6 +643,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             d.removeObject(forKey: "NSStatusItem Visible \(name)")
         }
         d.set(1.0, forKey: "NSStatusItem Preferred Position BB_Toggle")
+        d.set(false, forKey: "collapsed")
         d.synchronize()
     }
 

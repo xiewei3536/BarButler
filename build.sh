@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="BarButler"
-VERSION="${VERSION:-1.2.0}"
+VERSION="${VERSION:-1.3.0}"
 BUNDLE_ID="com.bowei.barbutler"
 DIST="dist"
 FEED_URL="https://raw.githubusercontent.com/xiewei3536/BarButler/main/appcast.xml"
@@ -83,6 +83,13 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>LSUIElement</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>NSHumanReadableCopyright</key><string>© 2026 Bowei</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>com.bowei.barbutler.automation</string>
+            <key>CFBundleURLSchemes</key><array><string>barbutler</string></array>
+        </dict>
+    </array>
     <key>SUFeedURL</key><string>$FEED_URL</string>
     <key>SUPublicEDKey</key><string>$ED_PUBLIC_KEY</string>
     <key>SUEnableAutomaticChecks</key><true/>
@@ -92,12 +99,23 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# 簽名身分:CI 以 SIGN_ID 傳入固定自簽憑證（保住輔助使用授權）；本機預設 ad-hoc
-SIGN_ID="${SIGN_ID:--}"
+# 簽名身分:固定自簽憑證「BarButler Self-Sign」讓輔助使用授權跨版本有效；找不到才退回 ad-hoc
+if [ -z "${SIGN_ID:-}" ]; then
+    if security find-identity -p codesigning 2>/dev/null | grep -q "BarButler Self-Sign"; then
+        SIGN_ID="BarButler Self-Sign"
+    else
+        SIGN_ID="-"
+    fi
+fi
 echo "▸ 簽名（identity: ${SIGN_ID}）…"
+# Sparkle 內部元件需逐一簽名（Autoupdate / Updater.app / XPC），否則更新安裝時會被拒
+SPK="$FRAMEWORKS/Sparkle.framework/Versions/B"
+for XPC in "$SPK"/XPCServices/*.xpc; do codesign --force -s "$SIGN_ID" "$XPC"; done
+codesign --force -s "$SIGN_ID" "$SPK/Autoupdate"
+codesign --force -s "$SIGN_ID" "$SPK/Updater.app"
 codesign --force -s "$SIGN_ID" "$FRAMEWORKS/Sparkle.framework"
 codesign --force --deep -s "$SIGN_ID" "$BUNDLE"
-codesign --verify --deep "$BUNDLE" && echo "  簽名驗證通過"
+codesign --verify --deep --strict "$BUNDLE" && echo "  簽名驗證通過"
 
 echo "▸ 製作 DMG…"
 STAGE="$DIST/dmg-stage"

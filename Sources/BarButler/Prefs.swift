@@ -6,16 +6,24 @@ final class Prefs: ObservableObject {
     static let shared = Prefs()
     private let d = UserDefaults.standard
 
-    @Published var language: String          { didSet { d.set(language, forKey: "language") } }
-    @Published var autoCollapseSeconds: Int  { didSet { d.set(autoCollapseSeconds, forKey: "autoCollapseSeconds") } }
-    @Published var hoverToExpand: Bool       { didSet { d.set(hoverToExpand, forKey: "hoverToExpand") } }
-    @Published var clickMode: String         { didSet { d.set(clickMode, forKey: "clickMode") } } // "menubar" | "float"
-    @Published var alwaysHiddenEnabled: Bool { didSet { d.set(alwaysHiddenEnabled, forKey: "alwaysHiddenEnabled") } }
-    @Published var hotkeyEnabled: Bool       { didSet { d.set(hotkeyEnabled, forKey: "hotkeyEnabled") } }
-    @Published var hotkeyKeyCode: Int        { didSet { d.set(hotkeyKeyCode, forKey: "hotkeyKeyCode") } }
-    @Published var hotkeyModifiers: UInt     { didSet { d.set(hotkeyModifiers, forKey: "hotkeyModifiers") } }
-    @Published var didOnboard: Bool          { didSet { d.set(didOnboard, forKey: "didOnboard") } }
-    @Published var collapsed: Bool           { didSet { d.set(collapsed, forKey: "collapsed") } }
+    @Published var language: String              { didSet { d.set(language, forKey: "language") } }
+    @Published var autoCollapseSeconds: Int      { didSet { d.set(autoCollapseSeconds, forKey: "autoCollapseSeconds") } }
+    @Published var hoverToExpand: Bool           { didSet { d.set(hoverToExpand, forKey: "hoverToExpand") } }
+    @Published var clickMode: String             { didSet { d.set(clickMode, forKey: "clickMode") } } // "menubar" | "float"
+    @Published var iconStyle: String             { didSet { d.set(iconStyle, forKey: "iconStyle") } } // "chevron" | "dots" | "arrows"
+    @Published var clickAwayCollapse: Bool       { didSet { d.set(clickAwayCollapse, forKey: "clickAwayCollapse") } }
+    @Published var showBoundaryWhileArranging: Bool { didSet { d.set(showBoundaryWhileArranging, forKey: "showBoundaryWhileArranging") } }
+    @Published var panelShowLabels: Bool         { didSet { d.set(panelShowLabels, forKey: "panelShowLabels") } }
+    @Published var alwaysHiddenEnabled: Bool     { didSet { d.set(alwaysHiddenEnabled, forKey: "alwaysHiddenEnabled") } }
+    @Published var hotkeyEnabled: Bool           { didSet { d.set(hotkeyEnabled, forKey: "hotkeyEnabled") } }
+    @Published var hotkeyKeyCode: Int            { didSet { d.set(hotkeyKeyCode, forKey: "hotkeyKeyCode") } }
+    @Published var hotkeyModifiers: UInt         { didSet { d.set(hotkeyModifiers, forKey: "hotkeyModifiers") } }
+    @Published var didOnboard: Bool              { didSet { d.set(didOnboard, forKey: "didOnboard") } }
+    @Published var collapsed: Bool               { didSet { d.set(collapsed, forKey: "collapsed") } }
+    @Published var didShowHideTip: Bool          { didSet { d.set(didShowHideTip, forKey: "didShowHideTip") } }
+    @Published var didShowEmptyTip: Bool         { didSet { d.set(didShowEmptyTip, forKey: "didShowEmptyTip") } }
+
+    var isFloatMode: Bool { clickMode == "float" }
 
     private init() {
         d.register(defaults: [
@@ -23,23 +31,35 @@ final class Prefs: ObservableObject {
             "autoCollapseSeconds": 10,
             "hoverToExpand": true,
             "clickMode": "menubar",
+            "iconStyle": "chevron",
+            "clickAwayCollapse": true,
+            "showBoundaryWhileArranging": true,
+            "panelShowLabels": true,
             "alwaysHiddenEnabled": false,
             "hotkeyEnabled": true,
             "hotkeyKeyCode": 11, // B
             "hotkeyModifiers": (1 << 20) | (1 << 19), // ⌘ + ⌥
             "didOnboard": false,
             "collapsed": false,
+            "didShowHideTip": false,
+            "didShowEmptyTip": false,
         ])
         language = d.string(forKey: "language") ?? "auto"
         autoCollapseSeconds = d.integer(forKey: "autoCollapseSeconds")
         hoverToExpand = d.bool(forKey: "hoverToExpand")
         clickMode = d.string(forKey: "clickMode") ?? "menubar"
+        iconStyle = d.string(forKey: "iconStyle") ?? "chevron"
+        clickAwayCollapse = d.bool(forKey: "clickAwayCollapse")
+        showBoundaryWhileArranging = d.bool(forKey: "showBoundaryWhileArranging")
+        panelShowLabels = d.bool(forKey: "panelShowLabels")
         alwaysHiddenEnabled = d.bool(forKey: "alwaysHiddenEnabled")
         hotkeyEnabled = d.bool(forKey: "hotkeyEnabled")
         hotkeyKeyCode = d.integer(forKey: "hotkeyKeyCode")
         hotkeyModifiers = UInt(bitPattern: d.integer(forKey: "hotkeyModifiers"))
         didOnboard = d.bool(forKey: "didOnboard")
         collapsed = d.bool(forKey: "collapsed")
+        didShowHideTip = d.bool(forKey: "didShowHideTip")
+        didShowEmptyTip = d.bool(forKey: "didShowEmptyTip")
     }
 }
 

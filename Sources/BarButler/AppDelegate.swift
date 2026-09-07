@@ -37,6 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.statusController.resetPositions()
             self?.relaunch()
         }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self?.statusController.refreshAfterWake() }
+            }
 
         if !prefs.didOnboard {
             showOnboarding()
@@ -47,6 +51,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showSettings()
         return true
+    }
+
+    // MARK: - URL 自動化：barbutler://toggle | show | hide | peek | panel | settings | update | mode/float | mode/menubar
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls { handle(url) }
+    }
+
+    private func handle(_ url: URL) {
+        guard url.scheme?.lowercased() == "barbutler", let sc = statusController else { return }
+        let cmd = (url.host ?? "").lowercased()
+        let arg = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        switch cmd {
+        case "toggle":               sc.toggle()
+        case "show", "expand":       sc.show()
+        case "hide", "collapse":     sc.hide()
+        case "peek":                 sc.peek()
+        case "panel":                sc.floatBar.toggle()
+        case "settings":             showSettings()
+        case "update", "check-updates": UpdaterManager.shared.checkForUpdates()
+        case "mode":
+            guard arg == "float" || arg == "menubar" else { return }
+            prefs.clickMode = arg
+            Toast.show(arg == "float" ? L.toastModeFloat.s : L.toastModeMenubar.s, kind: .info, near: sc.arrowScreenFrame)
+        default: break
+        }
     }
 
     // MARK: - 視窗
@@ -60,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true
             w.isReleasedWhenClosed = false
+            w.isRestorable = false
             w.title = "BarButler"
             w.setFrameAutosaveName("BBSettingsWindow")
             w.center()
@@ -78,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true
             w.isReleasedWhenClosed = false
+            w.isRestorable = false
             w.title = "BarButler"
             w.center()
             onboardingWindow = w
@@ -102,12 +134,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 等自己完全結束後再重新開啟（避免新舊實例同時存在而被去重邏輯砍掉）
     private func relaunch() {
         let path = Bundle.main.bundlePath
         guard path.hasSuffix(".app") else { NSApp.terminate(nil); return }
+        let pid = ProcessInfo.processInfo.processIdentifier
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        p.arguments = ["-n", path]
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done; /usr/bin/open \"\(path)\""]
         try? p.run()
         NSApp.terminate(nil)
     }
