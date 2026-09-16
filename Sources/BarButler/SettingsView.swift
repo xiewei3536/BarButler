@@ -363,6 +363,10 @@ struct AdvancedTab: View {
                     switchToggle($prefs.panelShowLabels)
                 }
                 RowDivider()
+                SettingRow(icon: "rectangle.expand.vertical", color: .orange, title: L.rowBorrow.s, subtitle: L.rowBorrowSub.s) {
+                    switchToggle($prefs.borrowOnExpand)
+                }
+                RowDivider()
                 SettingRow(icon: "eye.slash.fill", color: .purple, title: L.rowAlways.s, subtitle: L.rowAlwaysSub.s) {
                     switchToggle($prefs.alwaysHiddenEnabled)
                 }

@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Combine
 import ServiceManagement
 
@@ -50,6 +51,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var dragMonitors: [Any] = []
     private var forwardPending = false
     private var lastForwardTime = Date.distantPast
+    private var borrowed = false
+    private var normalMainMenu: NSMenu?
+    private weak var previousApp: NSRunningApplication?
     private var cancellables = Set<AnyCancellable>()
 
     private(set) var collapsed: Bool
@@ -322,11 +326,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             expandReason = .other
             cancelTimer()
             apply()
+            restoreMenuBarIfBorrowed()
             maybeShowCollapseHint()
         } else {
             expandReason = reason
             apply()
             scheduleCollapse()
+            if reason == .click || reason == .other { checkOverflowAfterExpand() }
         }
     }
 
@@ -341,6 +347,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             if !collapsed && !floatBar.isOpen { setCollapsed(true) } // 已展開時點 ‹ = 收合
             else { floatBar.toggle() }
         } else {
+            if collapsed, prefs.borrowOnExpand, needsRoom(forTarget: nil) { borrowMenuBar() }
             toggle()
         }
     }
@@ -380,17 +387,199 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     // MARK: - 面板代點（FloatBar 呼叫）
 
+    /// 一步到位：展開 → 等目標「真的顯示」→ 合成點擊。若 0.6 秒後仍被藏（選單列空間不足），
+    /// 借用選單列：讓 BarButler 短暫成為前景 App 騰出左側空間，收合時自動切回原 App。
+    func forwardClick(toWindow id: Int, name: String) {
+        // 必須在使用者點擊事件的同一時刻決定是否借位：macOS 14+ 只在互動當下允許 App 自行成為前景
+        if needsRoom(forTarget: id) { borrowMenuBar() }
+        beginForward()
+        var attempts = 0
+        var stable = 0
+        func tick() {
+            guard forwardPending else { return }
+            attempts += 1
+            // 借位時要等我們真的成為前景（選單列已切換），且目標連續兩次輪詢都在畫面上才點，
+            // 避免在選單列切換的瞬間誤點到前景 App 的選單
+            let ready = !borrowed || NSApp.isActive
+            if ready, let b = AXPresser.onscreenBounds(windowID: id) {
+                stable += 1
+                if stable >= 2 {
+                    Log.panel.info("forward click → \(name, privacy: .public) at x=\(Int(b.midX)) after \(attempts) polls borrowed=\(self.borrowed) active=\(NSApp.isActive)")
+                    AXPresser.click(at: CGPoint(x: b.midX, y: b.midY))
+                    endForward()
+                    return
+                }
+            } else {
+                stable = 0
+            }
+            if attempts == 5, !borrowed { borrowMenuBar() }   // 備援：預測失準時再試一次（可能被系統拒絕）
+            if attempts >= 24 {
+                Log.panel.error("forward failed: \(name, privacy: .public) never became visible")
+                Toast.show(L.toastOverflow.f(1), kind: .warning, near: arrowScreenFrame)
+                endForward()
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { tick() }
+        }
+        tick()
+    }
+
     func beginForward() {
         lastForwardTime = Date()
         forwardPending = true
         if collapsed { setCollapsed(false, reason: .forward) } else { expandReason = .forward }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in self?.endForward() } // 安全網
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in self?.endForward() } // 安全網
     }
 
     func endForward() {
         guard forwardPending else { return }
         forwardPending = false
         if !collapsed { scheduleCollapse(after: 1.0) }
+    }
+
+    // MARK: - 借用選單列（空間不足時）
+
+    private func borrowMenuBar() {
+        guard !borrowed else { return }
+        borrowed = true
+        previousApp = NSWorkspace.shared.frontmostApplication
+        normalMainMenu = NSApp.mainMenu
+        // 換成沒有任何快捷鍵的迷你選單，避免借位期間 ⌘Q 之類誤傷
+        let m = NSMenu()
+        let appItem = NSMenuItem()
+        let sub = NSMenu()
+        let info = NSMenuItem(title: L.borrowMenuTitle.s, action: nil, keyEquivalent: "")
+        info.isEnabled = false
+        sub.addItem(info)
+        appItem.submenu = sub
+        m.addItem(appItem)
+        NSApp.mainMenu = m
+        // accessory App 即使 active 也拿不到選單列；必須暫時成為 regular App（Dock 會短暫出現圖示）
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        Log.core.info("borrow menu bar from \(self.previousApp?.localizedName ?? "-", privacy: .public)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let s = self, s.borrowed else { return }
+            Log.core.info("borrow result: isActive=\(NSApp.isActive) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "-", privacy: .public)")
+            if !NSApp.isActive { s.restoreMenuBarIfBorrowed() } // 系統拒絕 → 立刻還原
+        }
+        // 輕推 pusher 1pt 再還原，強制狀態列依新的可用空間重新排版
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let s = self, !s.collapsed else { return }
+            s.pusher.length = Self.pusherIdle + 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { s.apply() }
+        }
+    }
+
+    private func restoreMenuBarIfBorrowed() {
+        guard borrowed else { return }
+        borrowed = false
+        if let normal = normalMainMenu { NSApp.mainMenu = normal }
+        let weAreFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+        if (NSApp.isActive || weAreFront), let prev = previousApp, !prev.isTerminated {
+            prev.activate()
+            Log.core.info("restore front app → \(prev.localizedName ?? "-", privacy: .public)")
+        }
+        previousApp = nil
+        // 交還前景後再退回 accessory（Dock 圖示消失）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    /// 展開後檢查是否仍有圖示因空間不足被藏：提示（一次）；若使用者開啟「暫借選單列」則借位
+    private func checkOverflowAfterExpand() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            guard let s = self, !s.collapsed, !s.peeking else { return }
+            let n = s.overflowHiddenCount()
+            guard n > 0 else { return }
+            Log.core.info("overflow: \(n) icons hidden by macOS after expand")
+            if s.prefs.borrowOnExpand {
+                s.borrowMenuBar()
+            } else if !s.prefs.didShowOverflowTip {
+                s.prefs.didShowOverflowTip = true
+                Toast.show(L.toastOverflow.f(n), kind: .info, near: s.arrowScreenFrame)
+            }
+        }
+    }
+
+    /// 前景 App 選單列的右緣 x（AX；需輔助使用權限）
+    private func frontAppMenuBarRightEdge() -> CGFloat? {
+        guard AXPresser.trusted, let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
+        let el = AXUIElementCreateApplication(app.processIdentifier)
+        var mb: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXMenuBarAttribute as CFString, &mb) == .success,
+              let mbAny = mb, CFGetTypeID(mbAny) == AXUIElementGetTypeID() else { return nil }
+        var kidsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(mbAny as! AXUIElement, kAXChildrenAttribute as CFString, &kidsRef) == .success,
+              let kidsAny = kidsRef, CFGetTypeID(kidsAny) == CFArrayGetTypeID() else { return nil }
+        let arr = kidsAny as! CFArray
+        var maxX: CGFloat = 0
+        for i in 0..<CFArrayGetCount(arr) {
+            let item = unsafeBitCast(CFArrayGetValueAtIndex(arr, i), to: AXUIElement.self)
+            var pos: CFTypeRef?, size: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(item, kAXPositionAttribute as CFString, &pos) == .success,
+                  AXUIElementCopyAttributeValue(item, kAXSizeAttribute as CFString, &size) == .success,
+                  let p = pos, CFGetTypeID(p) == AXValueGetTypeID(),
+                  let sz = size, CFGetTypeID(sz) == AXValueGetTypeID() else { continue }
+            var pt = CGPoint.zero, sv = CGSize.zero
+            AXValueGetValue(p as! AXValue, .cgPoint, &pt)
+            AXValueGetValue(sz as! AXValue, .cgSize, &sv)
+            maxX = max(maxX, pt.x + sv.width)
+        }
+        return maxX > 0 ? maxX : nil
+    }
+
+    /// 預測展開後是否會撞到前景 App 的選單：隱藏圖示會從 ‹ 左側依序緊密排列，
+    /// 用累計寬度推算目標（或最左圖示）展開後的 x，小於選單右緣就代表會被 macOS 藏起來
+    private func needsRoom(forTarget target: Int?) -> Bool {
+        guard let right = frontAppMenuBarRightEdge(), let boundary = arrowScreenMinX,
+              let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return false }
+        let myPid = Int(ProcessInfo.processInfo.processIdentifier)
+        let bands = ScreenGeometry.menuBarTopBandsCG()
+        var items: [(id: Int, x: CGFloat, w: CGFloat)] = []
+        for w in list {
+            guard let layer = w[kCGWindowLayer as String] as? Int, layer == 25,
+                  (w[kCGWindowOwnerPID as String] as? Int) != myPid,
+                  let num = w[kCGWindowNumber as String] as? Int,
+                  let bd = w[kCGWindowBounds as String] as? NSDictionary,
+                  let r = CGRect(dictionaryRepresentation: bd),
+                  r.height >= 16, r.height <= 40, r.width >= 8, r.width <= 400,
+                  bands.contains(where: { $0.contains(r.minY) }), r.midX < boundary - 4 else { continue }
+            if let alpha = w[kCGWindowAlpha as String] as? Double, alpha < 0.05 { continue }
+            items.append((num, r.minX, r.width))
+        }
+        guard !items.isEmpty else { return false }
+        var edge = boundary - 17 // 展開後 pusher（1pt + 邊距）的左緣
+        var predicted: CGFloat?
+        for it in items.sorted(by: { $0.x > $1.x }) {   // 由右至左累計
+            edge -= it.w
+            if target == nil || it.id == target { predicted = edge; if target != nil { break } }
+        }
+        guard let x = predicted else { return false }
+        let need = x < right + 6
+        Log.core.info("needsRoom target=\(target ?? -1) predictedX=\(Int(x)) menuRight=\(Int(right)) → \(need)")
+        return need
+    }
+
+    /// ‹ 左側、座標在畫面內、卻未真正顯示的第三方狀態列視窗數
+    private func overflowHiddenCount() -> Int {
+        guard let boundary = arrowScreenMinX,
+              let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return 0 }
+        let myPid = Int(ProcessInfo.processInfo.processIdentifier)
+        let bands = ScreenGeometry.menuBarTopBandsCG()
+        var n = 0
+        for w in list {
+            guard let layer = w[kCGWindowLayer as String] as? Int, layer == 25,
+                  (w[kCGWindowOwnerPID as String] as? Int) != myPid,
+                  let bd = w[kCGWindowBounds as String] as? NSDictionary,
+                  let r = CGRect(dictionaryRepresentation: bd),
+                  r.height >= 16, r.height <= 40, r.width >= 8, r.width <= 400,
+                  bands.contains(where: { $0.contains(r.minY) }),
+                  r.midX < boundary - 4, r.minX >= 0 else { continue }
+            if let alpha = w[kCGWindowAlpha as String] as? Double, alpha < 0.05 { continue }
+            if AXPresser.isHiddenByOverflow(w) { n += 1 }
+        }
+        return n
     }
 
     // MARK: - 自動收合

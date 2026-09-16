@@ -127,6 +127,14 @@ enum L {
     static let rowAlwaysSub = Tr("A second pocket further left for icons you almost never need. ⌥ click ‹ to peek.",
                                  "更左邊的第二層口袋，收納幾乎用不到的圖示；⌥ 點擊 ‹ 可暫時查看。",
                                  "更左边的第二层口袋，收纳几乎用不到的图标；⌥ 点击 ‹ 可临时查看。")
+    static let rowBorrow = Tr("Make Room When the Bar Is Full", "空間不足時暫借選單列", "空间不足时暂借菜单栏")
+    static let rowBorrowSub = Tr("When icons won't fit, BarButler briefly becomes the front app (a Dock icon appears for a moment) to free the left side, then switches back on collapse. The panel always does this automatically when needed.",
+                                 "預測到圖示放不下時，讓 BarButler 短暫成為前景 App（Dock 會暫時出現圖示）以騰出左側空間，收合時自動切回原 App。懸浮面板代點時一律自動處理。",
+                                 "预测到图标放不下时，让 BarButler 短暂成为前台 App（Dock 会暂时出现图标）以腾出左侧空间，收起时自动切回原 App。悬浮面板代点时一律自动处理。")
+    static let borrowMenuTitle = Tr("Making room in the menu bar…", "正在騰出選單列空間…", "正在腾出菜单栏空间…")
+    static let toastOverflow = Tr("The menu bar is full — %d icons don't fit. The floating panel can open them directly.",
+                                  "選單列空間不足，有 %d 個圖示放不下──用懸浮面板點它們最快",
+                                  "菜单栏空间不足，有 %d 个图标放不下——用悬浮面板点它们最快")
     static let rowPeek = Tr("Quick Peek", "快速一覽", "快速一览")
     static let rowPeekSub = Tr("Reveal everything for 5 seconds, then restore",
                                "顯示所有圖示 5 秒後自動恢復原狀", "显示所有图标 5 秒后自动恢复原状")

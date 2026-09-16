@@ -95,32 +95,28 @@ enum AXPresser {
         }
     }
 
-    /// 一步到位：展開後輪詢該圖示「視窗」的最新座標（視窗編號不變），
-    /// 一回到畫面上就對其中心送出合成點擊——與親手點擊等效，該圖示的選單立即展開。
-    static func clickStatusWindow(windowID: Int, attemptsLeft: Int = 14, completion: @escaping (Bool) -> Void) {
-        if let b = currentBounds(windowID: windowID), b.width > 0, xOnSomeScreen(b.midX) {
-            syntheticClick(at: CGPoint(x: b.midX, y: b.midY))
-            completion(true)
-            return
-        }
-        guard attemptsLeft > 0 else { completion(false); return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            clickStatusWindow(windowID: windowID, attemptsLeft: attemptsLeft - 1, completion: completion)
-        }
-    }
-
-    private static func currentBounds(windowID: Int) -> CGRect? {
+    /// 該狀態列視窗「真的顯示在畫面上」時回傳其座標。
+    /// 選單列空間不足時，macOS 會把最左側的圖示藏起來：座標仍在畫面內但 kCGWindowIsOnscreen 為 false，
+    /// 此時對座標點擊會誤觸前景 App 的選單，所以必須以 onscreen 為準。
+    static func onscreenBounds(windowID: Int) -> CGRect? {
         guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
         for w in list where (w[kCGWindowNumber as String] as? Int) == windowID {
-            if let d = w[kCGWindowBounds as String] as? NSDictionary,
-               let r = CGRect(dictionaryRepresentation: d) {
-                return r
-            }
+            guard (w[kCGWindowIsOnscreen as String] as? Bool) == true,
+                  let d = w[kCGWindowBounds as String] as? NSDictionary,
+                  let r = CGRect(dictionaryRepresentation: d), r.width > 0, xOnSomeScreen(r.midX) else { return nil }
+            return r
         }
         return nil
     }
+
+    /// 該視窗是否存在但目前被 macOS 藏起來（空間不足）
+    static func isHiddenByOverflow(_ w: [String: Any]) -> Bool {
+        (w[kCGWindowIsOnscreen as String] as? Bool) != true
+    }
+
+    static func click(at p: CGPoint) { syntheticClick(at: p) }
 
     private static func xOnSomeScreen(_ x: CGFloat) -> Bool {
         NSScreen.screens.contains { x >= $0.frame.minX && x <= $0.frame.maxX }
@@ -318,11 +314,7 @@ final class FloatBar {
             AXPresser.promptForPermission()
             return
         }
-        owner.beginForward()
-        AXPresser.clickStatusWindow(windowID: e.id) { ok in
-            Log.panel.info("forward click \(ok ? "sent" : "target never appeared", privacy: .public)")
-            owner.endForward()
-        }
+        owner.forwardClick(toWindow: e.id, name: e.name)
     }
 }
 

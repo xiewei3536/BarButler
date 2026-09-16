@@ -57,6 +57,7 @@ A tiny, native menu bar manager for macOS — hide the icons you rarely use behi
 
 To use the floating panel as the default: *Settings → General → Expand Style → Floating Panel*.
 Clicking an icon in the panel opens that icon's real menu in one step. This uses macOS Accessibility (a one-time grant — the app is signed with a stable identity so the grant survives updates). Keyboard works too: arrows to move, Return to open, Esc to close.
+If the front app's menus are so wide that the icon would not fit even when expanded, BarButler briefly becomes the front app to free the space (a Dock icon flashes for a moment), clicks the icon, then hands focus back on collapse.
 
 ## Diagnostics
 

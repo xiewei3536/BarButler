@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="BarButler"
-VERSION="${VERSION:-1.3.1}"
+VERSION="${VERSION:-1.3.2}"
 BUNDLE_ID="com.bowei.barbutler"
 DIST="dist"
 FEED_URL="https://raw.githubusercontent.com/xiewei3536/BarButler/main/appcast.xml"

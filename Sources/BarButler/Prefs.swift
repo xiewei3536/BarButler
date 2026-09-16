@@ -22,6 +22,8 @@ final class Prefs: ObservableObject {
     @Published var collapsed: Bool               { didSet { d.set(collapsed, forKey: "collapsed") } }
     @Published var didShowHideTip: Bool          { didSet { d.set(didShowHideTip, forKey: "didShowHideTip") } }
     @Published var didShowEmptyTip: Bool         { didSet { d.set(didShowEmptyTip, forKey: "didShowEmptyTip") } }
+    @Published var didShowOverflowTip: Bool      { didSet { d.set(didShowOverflowTip, forKey: "didShowOverflowTip") } }
+    @Published var borrowOnExpand: Bool          { didSet { d.set(borrowOnExpand, forKey: "borrowOnExpand") } }
 
     var isFloatMode: Bool { clickMode == "float" }
 
@@ -43,6 +45,8 @@ final class Prefs: ObservableObject {
             "collapsed": false,
             "didShowHideTip": false,
             "didShowEmptyTip": false,
+            "didShowOverflowTip": false,
+            "borrowOnExpand": false,
         ])
         language = d.string(forKey: "language") ?? "auto"
         autoCollapseSeconds = d.integer(forKey: "autoCollapseSeconds")
@@ -60,6 +64,8 @@ final class Prefs: ObservableObject {
         collapsed = d.bool(forKey: "collapsed")
         didShowHideTip = d.bool(forKey: "didShowHideTip")
         didShowEmptyTip = d.bool(forKey: "didShowEmptyTip")
+        didShowOverflowTip = d.bool(forKey: "didShowOverflowTip")
+        borrowOnExpand = d.bool(forKey: "borrowOnExpand")
     }
 }
 
