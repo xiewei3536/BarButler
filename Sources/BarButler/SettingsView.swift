@@ -82,11 +82,17 @@ private func switchToggle(_ binding: Binding<Bool>) -> some View {
 
 // MARK: - 主設定視窗
 
+/// 設定視窗目前的分頁（外部可指定開在哪一頁，例如「整理圖示…」直接開到圖示配置）
+final class SettingsRouter: ObservableObject {
+    static let shared = SettingsRouter()
+    enum Tab: CaseIterable { case layout, general, advanced, about }
+    @Published var tab: Tab = .layout
+}
+
 struct SettingsRoot: View {
     @EnvironmentObject var prefs: Prefs
-
-    enum Tab: CaseIterable { case general, advanced, about }
-    @State private var tab: Tab = .general
+    @ObservedObject private var router = SettingsRouter.shared
+    private var tab: SettingsRouter.Tab { router.tab }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -94,6 +100,7 @@ struct SettingsRoot: View {
             ScrollView(showsIndicators: false) {
                 Group {
                     switch tab {
+                    case .layout: LayoutTab()
                     case .general: GeneralTab()
                     case .advanced: AdvancedTab()
                     case .about: AboutTab()
@@ -103,8 +110,9 @@ struct SettingsRoot: View {
                 .padding(.bottom, 18)
                 .padding(.top, 4)
             }
+            .id(tab) // 切換分頁時捲回最上面
         }
-        .frame(width: 600, height: 610)
+        .frame(width: 640, height: 600)
         .background(VisualEffectBackground().ignoresSafeArea())
         .id(prefs.language) // 語言切換時整體重繪
     }
@@ -140,6 +148,7 @@ struct SettingsRoot: View {
 
     private var tabBar: some View {
         HStack(spacing: 3) {
+            tabButton(.layout, icon: "square.grid.3x1.below.line.grid.1x2", label: L.tabLayout.s)
             tabButton(.general, icon: "gearshape.fill", label: L.tabGeneral.s)
             tabButton(.advanced, icon: "wand.and.stars", label: L.tabAdvanced.s)
             tabButton(.about, icon: "info.circle.fill", label: L.tabAbout.s)
@@ -148,17 +157,18 @@ struct SettingsRoot: View {
         .background(Capsule().fill(Color.primary.opacity(0.06)))
     }
 
-    private func tabButton(_ t: Tab, icon: String, label: String) -> some View {
+    private func tabButton(_ t: SettingsRouter.Tab, icon: String, label: String) -> some View {
         Button {
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { tab = t }
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { router.tab = t }
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: icon).font(.system(size: 11, weight: .semibold))
                 Text(label).font(.system(size: 12, weight: .medium))
             }
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(Capsule().fill(tab == t ? AnyShapeStyle(BB.accent) : AnyShapeStyle(Color.clear)))
+            .contentShape(Capsule())
             .foregroundStyle(tab == t ? .white : .secondary)
         }
         .buttonStyle(.plain)
@@ -209,10 +219,11 @@ struct GeneralTab: View {
                         Image(systemName: "chevron.left").tag("chevron")
                         Image(systemName: "ellipsis.circle").tag("dots")
                         Image(systemName: "arrow.left.to.line.compact").tag("arrows")
+                        Image(systemName: "capsule.portrait").tag("pill")
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: 140)
+                    .frame(width: 180)
                 }
                 RowDivider()
                 SettingRow(icon: "timer", color: .orange,
@@ -308,7 +319,15 @@ struct AdvancedTab: View {
     @EnvironmentObject var prefs: Prefs
     @State private var axTrusted = AXPresser.trusted
     @State private var copied: String?
+    @State private var healthTick = 0
     private let ticker = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    private var healthText: String {
+        _ = healthTick
+        guard let c = StatusBarController.current else { return L.rowHealthSub.s }
+        let when = c.lastHealthCheck.map { RelativeDateTimeFormatter().localizedString(for: $0, relativeTo: Date()) } ?? L.healthNever.s
+        return L.rowHealthSub.s + "\n" + L.healthFmt.f(when, c.repairCount)
+    }
 
     private let commands: [(String, Tr)] = [
         ("barbutler://toggle", L.cmdToggle),
@@ -318,7 +337,10 @@ struct AdvancedTab: View {
         ("barbutler://panel", L.cmdPanel),
         ("barbutler://mode/float", L.modeFloat),
         ("barbutler://mode/menubar", L.modeMenubar),
+        ("barbutler://move?item=LINE&to=shown", L.cmdMove),
+        ("barbutler://arrange", L.cmdArrange),
         ("barbutler://settings", L.cmdSettings),
+        ("barbutler://diagnose", L.cmdDiagnose),
     ]
 
     var body: some View {
@@ -359,7 +381,7 @@ struct AdvancedTab: View {
                     switchToggle($prefs.showBoundaryWhileArranging)
                 }
                 RowDivider()
-                SettingRow(icon: "textformat", color: .mint, title: L.rowPanelLabels.s, subtitle: L.rowPanelLabelsSub.s) {
+                SettingRow(icon: "text.below.photo", color: .mint, title: L.rowPanelLabels.s, subtitle: L.rowPanelLabelsSub.s) {
                     switchToggle($prefs.panelShowLabels)
                 }
                 RowDivider()
@@ -409,6 +431,24 @@ struct AdvancedTab: View {
                 }
                 .padding(.bottom, 8)
             }
+
+            Card {
+                SettingRow(icon: "checkmark.shield.fill", color: .green, title: L.rowHealth.s, subtitle: healthText) {
+                    Button(L.btnCheck.s) {
+                        StatusBarController.current?.healthCheck("manual")
+                        healthTick += 1
+                    }
+                    .controlSize(.small)
+                }
+                RowDivider()
+                SettingRow(icon: "doc.text.magnifyingglass", color: .blue, title: L.rowDiagnose.s, subtitle: L.rowDiagnoseSub.s) {
+                    Button(L.btnDiagnose.s) {
+                        if let url = Diagnostics.write() { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    }
+                    .controlSize(.small)
+                }
+            }
+            .onReceive(ticker) { _ in healthTick += 1 }
 
             Card {
                 SettingRow(icon: "arrow.counterclockwise", color: .gray, title: L.rowReset.s, subtitle: L.rowResetSub.s) {

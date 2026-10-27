@@ -24,6 +24,10 @@ final class Prefs: ObservableObject {
     @Published var didShowEmptyTip: Bool         { didSet { d.set(didShowEmptyTip, forKey: "didShowEmptyTip") } }
     @Published var didShowOverflowTip: Bool      { didSet { d.set(didShowOverflowTip, forKey: "didShowOverflowTip") } }
     @Published var borrowOnExpand: Bool          { didSet { d.set(borrowOnExpand, forKey: "borrowOnExpand") } }
+    @Published var realIcons: Bool               { didSet { d.set(realIcons, forKey: "realIcons") } } // 圖示配置／面板顯示真實選單列圖示（需螢幕錄製）
+    @Published var lastSeenVersion: String       { didSet { d.set(lastSeenVersion, forKey: "lastSeenVersion") } }
+    @Published var showWhatsNew: Bool            { didSet { d.set(showWhatsNew, forKey: "showWhatsNew") } }
+    @Published var rememberLayout: Bool          { didSet { d.set(rememberLayout, forKey: "rememberLayout") } } // 配置被打亂時自動歸位
 
     var isFloatMode: Bool { clickMode == "float" }
 
@@ -47,6 +51,10 @@ final class Prefs: ObservableObject {
             "didShowEmptyTip": false,
             "didShowOverflowTip": false,
             "borrowOnExpand": false,
+            "realIcons": false,
+            "lastSeenVersion": "",
+            "showWhatsNew": false,
+            "rememberLayout": true,
         ])
         language = d.string(forKey: "language") ?? "auto"
         autoCollapseSeconds = d.integer(forKey: "autoCollapseSeconds")
@@ -66,6 +74,10 @@ final class Prefs: ObservableObject {
         didShowEmptyTip = d.bool(forKey: "didShowEmptyTip")
         didShowOverflowTip = d.bool(forKey: "didShowOverflowTip")
         borrowOnExpand = d.bool(forKey: "borrowOnExpand")
+        realIcons = d.bool(forKey: "realIcons")
+        lastSeenVersion = d.string(forKey: "lastSeenVersion") ?? ""
+        showWhatsNew = d.bool(forKey: "showWhatsNew")
+        rememberLayout = d.bool(forKey: "rememberLayout")
     }
 }
 
@@ -74,4 +86,5 @@ extension Notification.Name {
     static let bbShowOnboarding = Notification.Name("bb.showOnboarding")
     static let bbResetPositions = Notification.Name("bb.resetPositions")
     static let bbShowSettings = Notification.Name("bb.showSettings")
+    static let bbShowLayout = Notification.Name("bb.showLayout")
 }

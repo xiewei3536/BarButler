@@ -3,11 +3,16 @@ import SwiftUI
 
 enum ToastKind { case success, info, warning }
 
-/// 輕量提示：出現在 ‹ 下方（或螢幕右上角），2.8 秒後自動淡出
+/// 輕量提示：出現在 ‹ 下方（或螢幕右上角），預設 2.8 秒後自動淡出
 enum Toast {
     private static var panel: NSPanel?
 
-    static func show(_ text: String, kind: ToastKind = .success, near anchor: NSRect? = nil) {
+    static func show(_ text: String, kind: ToastKind = .success, near anchor: NSRect? = nil, duration: TimeInterval = 2.8) {
+        // 睡眠／螢幕關閉期間不顯示（暗喚醒時跳出的提示，使用者醒來只會看到殘影）
+        guard !SystemMonitor.shared.systemAsleep, !SystemMonitor.shared.screensAsleep else {
+            Log.event("toast suppressed while asleep: \(text)")
+            return
+        }
         panel?.orderOut(nil)
 
         let (symbol, color): (String, Color) = {
@@ -24,7 +29,7 @@ enum Toast {
                 .foregroundStyle(color)
             Text(text)
                 .font(.system(size: 12.5, weight: .medium))
-                .lineLimit(2)
+                .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 16)
@@ -68,7 +73,7 @@ enum Toast {
         }
         panel = p
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) { [weak p] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak p] in
             guard let p, p == panel else { return }
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.3
