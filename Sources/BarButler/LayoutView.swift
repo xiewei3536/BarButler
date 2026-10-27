@@ -27,11 +27,14 @@ final class LayoutModel: ObservableObject {
         timer?.invalidate()
         // 關閉視窗時 SwiftUI 不一定會呼叫 onDisappear：計時器自己確認視窗還看得到才更新（AX 查詢不便宜）
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard NSApp.windows.contains(where: { $0.identifier?.rawValue == "BBSettings" && $0.isVisible }) else { return }
-                self?.refresh()
-            }
+            guard let model = self else { return }   // 先取成常數：Swift 5.10 不允許在 Task 裡引用 weak 捕獲的 self
+            Task { @MainActor in model.tick() }
         }
+    }
+
+    private func tick() {
+        guard NSApp.windows.contains(where: { $0.identifier?.rawValue == "BBSettings" && $0.isVisible }) else { return }
+        refresh()
     }
 
     func stop() {
