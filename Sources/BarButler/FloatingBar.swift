@@ -19,6 +19,7 @@ final class FloatBar {
     private var observers: [NSObjectProtocol] = []
     private var hoverTimer: Timer?
     private var outsideSince: Date?
+    private var rowSizes: [Int] = []
     private var entries: [BarItem] = []   // 鍵盤導覽順序（收合區在前、永久隱藏在後）
     private let state = PanelState()
 
@@ -29,10 +30,13 @@ final class FloatBar {
     func open(byHover: Bool = false) {
         close()
         guard let owner else { return }
-        let snap = owner.snapshot()
+        let snap = owner.layoutSnapshot()
         let hidden = snap.items(in: .hidden)
         let always = snap.items(in: .alwaysHidden)
         entries = hidden + always
+        rowSizes = PanelNavigation.rowSizes(count: hidden.count) + PanelNavigation.rowSizes(count: always.count)
+        let arrow = owner.arrowScreenFrame
+        let screen = NSScreen.screens.first { s in arrow.map { s.frame.intersects($0) } ?? false } ?? NSScreen.main
         state.selected = nil
 
         let view = FloatBarView(
@@ -42,6 +46,7 @@ final class FloatBar {
             alwaysEnabled: Prefs.shared.alwaysHiddenEnabled,
             showLabels: Prefs.shared.panelShowLabels,
             axTrusted: AXPresser.trusted,
+            maxGridHeight: max(100, (screen?.visibleFrame.height ?? 700) - 180),
             state: state,
             indexOf: { [weak self] id in self?.entries.firstIndex { $0.windowID == id } },
             onTap: { [weak self] e in self?.handleTap(e) },
@@ -77,8 +82,6 @@ final class FloatBar {
         p.contentView = host
 
         // 靠著 ‹ 下方、貼齊右側
-        let arrow = owner.arrowScreenFrame
-        let screen = NSScreen.screens.first { s in arrow.map { s.frame.intersects($0) } ?? false } ?? NSScreen.main
         var origin = NSPoint.zero
         if let f = screen?.visibleFrame {
             var x = (arrow?.maxX ?? f.maxX) - size.width + 10
@@ -90,7 +93,7 @@ final class FloatBar {
         p.makeKeyAndOrderFront(nil)
         panel = p
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.16
+            ctx.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.16
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             p.animator().alphaValue = 1
             p.animator().setFrameOrigin(origin)
@@ -130,8 +133,11 @@ final class FloatBar {
             if ev.modifierFlags.contains(.command) { s.close(); return nil } // 別讓 ⌘ 組合鍵誤傳到 App 主選單
             switch ev.keyCode {
             case 53: s.close(); return nil                                  // Esc
-            case 123, 126: s.moveSelection(-1); return nil                  // ← ↑
-            case 124, 125, 48: s.moveSelection(+1); return nil              // → ↓ Tab
+            case 123: s.moveSelection(.horizontal(-1)); return nil           // ←
+            case 124: s.moveSelection(.horizontal(1)); return nil            // →
+            case 126: s.moveSelection(.vertical(-1)); return nil             // ↑
+            case 125: s.moveSelection(.vertical(1)); return nil              // ↓
+            case 48: s.moveSelection(.horizontal(ev.modifierFlags.contains(.shift) ? -1 : 1)); return nil
             case 36, 49, 76:                                                // ↩ Space Enter
                 if let i = s.state.selected, s.entries.indices.contains(i) { s.handleTap(s.entries[i]) }
                 return nil
@@ -157,10 +163,8 @@ final class FloatBar {
         NSApp.windows.contains { $0.isVisible && $0.className.contains("Menu") && $0.level.rawValue >= NSWindow.Level.popUpMenu.rawValue }
     }
 
-    private func moveSelection(_ delta: Int) {
-        guard !entries.isEmpty else { return }
-        let cur = state.selected ?? (delta > 0 ? -1 : entries.count)
-        state.selected = (cur + delta + entries.count) % entries.count
+    private func moveSelection(_ movement: PanelNavigation.Movement) {
+        state.selected = PanelNavigation.next(selected: state.selected, movement: movement, rows: rowSizes)
     }
 
     /// 懸停開啟的面板：滑鼠離開「‹ ＋ 面板 ＋ 兩者之間的走廊」超過 0.6 秒就自動關閉
@@ -225,6 +229,7 @@ struct FloatBarView: View {
     let alwaysEnabled: Bool
     let showLabels: Bool
     let axTrusted: Bool
+    let maxGridHeight: CGFloat
     @ObservedObject var state: PanelState
     let indexOf: (Int) -> Int?
     let onTap: (BarItem) -> Void
@@ -233,36 +238,63 @@ struct FloatBarView: View {
     let onRestore: () -> Void
     let onGrant: () -> Void
 
-    private let maxPerRow = 7
+    private var gridHeight: CGFloat {
+        let rows = PanelNavigation.rowSizes(count: hidden.count).count + PanelNavigation.rowSizes(count: always.count).count
+        return CGFloat(rows) * (showLabels ? 65 : 48) + (always.isEmpty ? 0 : 24)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             header
+            HStack(spacing: 5) {
+                Image(systemName: "cursorarrow.click").foregroundStyle(BB.accentColor)
+                Text(L.singleItemHint.s).foregroundStyle(.secondary)
+            }
+            .font(.system(size: 10.5))
+            .padding(.horizontal, 2)
+            .padding(.bottom, 3)
             if pendingRestore > 0, axTrusted { restoreBanner }
             if hidden.isEmpty && always.isEmpty {
                 emptyState
             } else {
-                grid(hidden)
-                if !always.isEmpty {
-                    HStack(spacing: 6) {
-                        Image(systemName: "eye.slash").font(.system(size: 9, weight: .semibold))
-                        Text(L.sectionAlways.s).font(.system(size: 10, weight: .semibold))
-                        Rectangle().fill(Color.primary.opacity(0.1)).frame(height: 1)
-                    }
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 2)
-                    grid(always).opacity(0.85)
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: gridHeight > maxGridHeight) { iconSections }
+                        .frame(height: min(gridHeight, maxGridHeight))
+                        .onChange(of: state.selected) { selected in
+                            let items = hidden + always
+                            if let selected, items.indices.contains(selected) {
+                                proxy.scrollTo(items[selected].windowID, anchor: .center)
+                            }
+                        }
                 }
             }
             footer
         }
         .padding(10)
-        .frame(minWidth: 230)
+        .frame(width: max(280, CGFloat(max(PanelNavigation.rowSizes(count: hidden.count).max() ?? 0,
+                                                    PanelNavigation.rowSizes(count: always.count).max() ?? 0))
+                                      * (showLabels ? 72 : 48) + 20))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
         )
+    }
+
+    private var iconSections: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            grid(hidden)
+            if !always.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "eye.slash").font(.system(size: 9, weight: .semibold))
+                    Text(L.sectionAlways.s).font(.system(size: 10, weight: .semibold))
+                    Rectangle().fill(Color.primary.opacity(0.1)).frame(height: 1)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+                grid(always).opacity(0.85)
+            }
+        }
     }
 
     private var header: some View {
@@ -311,15 +343,18 @@ struct FloatBarView: View {
     }
 
     private func grid(_ items: [BarItem]) -> some View {
-        // 平均分排：8 個 → 4＋4，而不是 7＋1
-        let rowCount = max(1, Int(ceil(Double(items.count) / Double(maxPerRow))))
-        let perRow = max(1, Int(ceil(Double(items.count) / Double(rowCount))))
-        let rows = stride(from: 0, to: items.count, by: perRow).map { Array(items[$0..<min($0 + perRow, items.count)]) }
+        let sizes = PanelNavigation.rowSizes(count: items.count)
+        var start = 0
+        let rows = sizes.map { count -> [BarItem] in
+            defer { start += count }
+            return Array(items[start..<(start + count)])
+        }
         return VStack(alignment: .leading, spacing: 2) {
             ForEach(rows.indices, id: \.self) { r in
                 HStack(spacing: 2) {
                     ForEach(rows[r]) { e in cell(e) }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -347,8 +382,12 @@ struct FloatBarView: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
+        .id(e.windowID)
         .buttonStyle(FloatIconButtonStyle())
         .help(e.label)
+        .accessibilityLabel(e.label)
+        .accessibilityHint(L.singleItemHint.s)
+        .accessibilityAddTraits(selected ? .isSelected : [])
         .onHover { hovering in if hovering { state.selected = idx } }
         .contextMenu {
             Button { onMove(e, .shown) } label: { Label(L.moveToShown.s, systemImage: "pin.fill") }
@@ -443,13 +482,14 @@ struct ItemIconView: View {
 }
 
 struct FloatIconButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color.primary.opacity(configuration.isPressed ? 0.16 : 0))
             )
-            .scaleEffect(configuration.isPressed ? 0.93 : 1)
-            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.95 : 1)
+            .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
     }
 }

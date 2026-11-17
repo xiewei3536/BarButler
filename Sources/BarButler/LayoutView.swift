@@ -15,7 +15,8 @@ final class LayoutModel: ObservableObject {
     @Published var shownWidth: CGFloat = 0
     @Published var screenWidth: CGFloat = 1440
     @Published var iconsVersion = 0   // 圖示擷取更新時觸發重繪
-    var dragging: BarItem?
+    private var dragging: (item: BarItem, token: String)?
+    static let dragType = UTType(exportedAs: "com.bowei.barbutler.menu-item")
     private var timer: Timer?
     private var noticeWork: DispatchWorkItem?
 
@@ -46,7 +47,7 @@ final class LayoutModel: ObservableObject {
         axTrusted = AXPresser.trusted
         screenPermitted = IconCache.shared.permitted
         guard let c = controller, !ItemMover.shared.busy else { return }
-        let snap = c.snapshot()
+        let snap = c.layoutSnapshot()
         if IconCache.shared.enabled {
             IconCache.shared.capture(snap.items)
             iconsVersion &+= 1
@@ -61,7 +62,7 @@ final class LayoutModel: ObservableObject {
 
     /// 開啟真實圖示時，收合中的圖示在畫面外擷取不到：短暫展開一次把它們都拍下來
     func warmUpIcons() {
-        guard IconCache.shared.enabled, let c = controller, c.collapsed, !ItemMover.shared.busy else { return }
+        guard IconCache.shared.enabled, let c = controller, c.collapsed, !c.singleItemInteractionActive, !ItemMover.shared.busy else { return }
         c.beginEditing()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
             IconCache.shared.capture(c.snapshot(details: false).items)
@@ -74,6 +75,7 @@ final class LayoutModel: ObservableObject {
     func move(_ item: BarItem, to dest: BarSection) {
         guard item.section != dest else { return }
         guard let c = controller else { return }
+        guard !c.singleItemInteractionActive else { show(L.moveBusy.s, ok: false); return }
         guard item.movable else { show(L.itemLocked.s, ok: false); return }
         guard AXPresser.trusted else {
             show(L.moveNeedsAX.s, ok: false)
@@ -94,10 +96,30 @@ final class LayoutModel: ObservableObject {
         }
     }
 
-    func dropDragging(on dest: BarSection) {
-        guard let d = dragging else { return }
-        dragging = nil
-        move(d, to: dest)
+    func beginDrag(_ item: BarItem) -> NSItemProvider {
+        guard item.movable, busyText == nil, !ItemMover.isMoving else { dragging = nil; return NSItemProvider() }
+        let token = "\(item.windowID):\(UUID().uuidString)"
+        dragging = (item, token)
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: Self.dragType.identifier, visibility: .ownProcess) { completion in
+            completion(Data(token.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+
+    func acceptDrop(_ providers: [NSItemProvider], on destination: BarSection) -> Bool {
+        guard dragging != nil, busyText == nil, !ItemMover.isMoving,
+              let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(Self.dragType.identifier) }) else { return false }
+        provider.loadDataRepresentation(forTypeIdentifier: Self.dragType.identifier) { [weak self] data, _ in
+            guard let data, let token = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                guard let self, let drag = self.dragging, drag.token == token else { return }
+                self.dragging = nil
+                self.move(drag.item, to: destination)
+            }
+        }
+        return true
     }
 
     func relocate(rightEnd: Bool) {
@@ -122,9 +144,11 @@ struct LayoutTab: View {
     @EnvironmentObject var prefs: Prefs
     @StateObject private var model = LayoutModel()
     @State private var target: BarSection?
+    @State private var query = ""
 
     var body: some View {
         VStack(spacing: 12) {
+            overview
             if prefs.showWhatsNew { whatsNew }
             if !model.axTrusted { permissionCard }
 
@@ -146,6 +170,12 @@ struct LayoutTab: View {
         .overlay(alignment: .top) { statusBanner }
         .onAppear { model.start() }
         .onDisappear { model.stop() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
+            if (notification.object as? NSWindow)?.identifier?.rawValue == "BBSettings" { model.stop() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
+            if (notification.object as? NSWindow)?.identifier?.rawValue == "BBSettings" { model.start() }
+        }
         .onChange(of: prefs.alwaysHiddenEnabled) { _ in model.refresh() }
         .onChange(of: prefs.realIcons) { on in
             if on, !IconCache.shared.permitted {
@@ -157,11 +187,43 @@ struct LayoutTab: View {
         }
     }
 
+    private var overview: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(L.layoutTitle.s).font(.system(size: 19, weight: .bold))
+                    Text(L.layoutSubtitle.s).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "menubar.rectangle").font(.system(size: 26, weight: .light))
+                    .foregroundStyle(BB.accentColor)
+                    .padding(10).background(BB.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField(L.searchIcons.s, text: $query).textFieldStyle(.plain)
+                    .accessibilityLabel(L.searchIcons.s)
+                if !query.isEmpty {
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain).help(L.clearSearch.s).accessibilityLabel(L.clearSearch.s)
+                }
+            }
+            .font(.system(size: 12))
+            .padding(9)
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
+        }
+        .padding(15)
+        .background(BB.accentColor.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+    }
+
     // MARK: 區塊
 
     private func sectionCard<Accessory: View>(_ s: BarSection, items: [BarItem], icon: String, color: Color,
                                               subtitle: String, @ViewBuilder accessory: () -> Accessory) -> some View {
         let targeted = target == s
+        let filtered = items.filter { $0.matchesSearch(query) }
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 ZStack {
@@ -171,7 +233,7 @@ struct LayoutTab: View {
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 6) {
                         Text(s.title).font(.system(size: 13, weight: .semibold))
-                        Text("\(items.count)")
+                        Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "\(items.count)" : "\(filtered.count)/\(items.count)")
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(Capsule().fill(Color.primary.opacity(0.08)))
@@ -181,7 +243,7 @@ struct LayoutTab: View {
                 Spacer(minLength: 8)
                 accessory()
             }
-            strip(s, items: items)
+            strip(s, items: filtered)
         }
         .padding(12)
         .background(
@@ -192,13 +254,12 @@ struct LayoutTab: View {
                         .strokeBorder(targeted ? BB.accentColor : Color.primary.opacity(0.08), lineWidth: targeted ? 2 : 1)
                 )
         )
-        .onDrop(of: [UTType.plainText, UTType.text], isTargeted: Binding(
+        .onDrop(of: [LayoutModel.dragType], isTargeted: Binding(
             get: { target == s },
             set: { on in
                 if on { target = s } else if target == s { target = nil }
-            })) { _ in
-            model.dropDragging(on: s)
-            return true
+            })) { providers in
+            model.acceptDrop(providers, on: s)
         }
         .animation(.easeOut(duration: 0.15), value: targeted)
     }
@@ -209,7 +270,7 @@ struct LayoutTab: View {
             if items.isEmpty {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.to.line.compact").font(.system(size: 11))
-                    Text(L.sectionEmpty.s).font(.system(size: 11))
+                    Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? L.sectionEmpty.s : L.searchNoResults.s).font(.system(size: 11))
                 }
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, minHeight: 54)
@@ -234,10 +295,10 @@ struct LayoutTab: View {
     private func tile(_ item: BarItem) -> some View {
         LayoutTile(item: item, iconsVersion: model.iconsVersion)
             .opacity(model.busyText != nil ? 0.6 : 1)
-            .onDrag {
-                model.dragging = item
-                return NSItemProvider(object: String(item.windowID) as NSString)
-            }
+            .onDrag { model.beginDrag(item) }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(item.label)
+            .accessibilityHint(item.movable ? L.dragHint.s : L.itemLocked.s)
             .contextMenu {
                 if item.movable {
                     if item.section != .shown {

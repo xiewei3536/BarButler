@@ -71,6 +71,14 @@ struct BarItem: Identifiable, Equatable {
 
     var id: Int { windowID }
 
+    func inSection(_ section: BarSection) -> BarItem {
+        var item = BarItem(windowID: windowID, pid: pid, bundleID: bundleID, appName: appName,
+                          label: label, axIdentifier: axIdentifier, windowTitle: windowTitle,
+                          frame: frame, onScreen: onScreen, section: section, movable: movable)
+        item.axUnavailable = axUnavailable
+        return item
+    }
+
     var appIcon: NSImage {
         NSRunningApplication(processIdentifier: pid)?.icon ?? NSWorkspace.shared.icon(for: .applicationBundle)
     }
@@ -363,15 +371,17 @@ enum AXPresser {
     /// 該狀態列視窗「真的顯示在畫面上」時回傳其座標。
     /// 選單列空間不足時，macOS 會把最左側的圖示藏起來：座標仍在畫面內但 kCGWindowIsOnscreen 為 false，
     /// 此時對座標點擊會誤觸前景 App 的選單，所以必須以 onscreen 為準。
-    static func onscreenBounds(windowID: Int) -> CGRect? {
+    static func onscreenBounds(windowID: Int) -> CGRect? { bounds(windowID: windowID, requireOnscreen: true) }
+
+    static func bounds(windowID: Int, requireOnscreen: Bool = false) -> CGRect? {
         guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
         for w in list where (w[kCGWindowNumber as String] as? Int) == windowID {
-            guard (w[kCGWindowIsOnscreen as String] as? Bool) == true,
+            guard (!requireOnscreen || (w[kCGWindowIsOnscreen as String] as? Bool) == true),
                   let d = w[kCGWindowBounds as String] as? NSDictionary,
                   let r = CGRect(dictionaryRepresentation: d), r.width > 0,
-                  ScreenGeometry.xOnSomeScreen(r.midX) else { return nil }
+                  (!requireOnscreen || ScreenGeometry.xOnSomeScreen(r.midX)) else { return nil }
             return r
         }
         return nil
@@ -380,6 +390,32 @@ enum AXPresser {
     /// 該視窗是否存在但目前被 macOS 藏起來（空間不足）
     static func isHiddenByOverflow(_ w: [String: Any]) -> Bool {
         (w[kCGWindowIsOnscreen as String] as? Bool) != true
+    }
+
+    /// Revalidate immediately before mouse-down, rather than clicking a stale
+    /// coordinate after asynchronous menu-bar layout changes.
+    @MainActor static func click(windowID: Int) async -> Bool {
+        guard trusted, SystemMonitor.shared.canPostEvents,
+              let frame = onscreenBounds(windowID: windowID),
+              let source = CGEventSource(stateID: .hidSystemState) else { return false }
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+        move?.flags = []
+        move?.post(tap: .cghidEventTap)
+        do { try await Task.sleep(nanoseconds: 30_000_000) } catch { return false }
+        guard !Task.isCancelled, SystemMonitor.shared.canPostEvents,
+              onscreenBounds(windowID: windowID) == frame,
+              let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+              let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) else { return false }
+        down.flags = []
+        up.flags = []
+        down.setIntegerValueField(.mouseEventClickState, value: 1)
+        up.setIntegerValueField(.mouseEventClickState, value: 1)
+        down.post(tap: .cghidEventTap)
+        // Always release, including if the task was cancelled during this pause.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        up.post(tap: .cghidEventTap)
+        return true
     }
 
     /// 先移到目標讓對方拿到 hover 狀態，再按下、放開

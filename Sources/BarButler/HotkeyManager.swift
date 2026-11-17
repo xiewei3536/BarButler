@@ -6,6 +6,7 @@ final class HotkeyManager {
     static let shared = HotkeyManager()
     var onTrigger: (() -> Void)?
 
+    private var paused = false
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
     private var last: (keyCode: Int, mods: UInt, enabled: Bool)?
@@ -13,7 +14,7 @@ final class HotkeyManager {
     func register(keyCode: Int, modifiersRaw: UInt, enabled: Bool) {
         last = (keyCode, modifiersRaw, enabled)
         unregister()
-        guard enabled else { return }
+        guard enabled, !paused, Self.validKeyCode(keyCode) else { return }
         installHandlerIfNeeded()
         let flags = NSEvent.ModifierFlags(rawValue: modifiersRaw)
         var carbon: UInt32 = 0
@@ -31,8 +32,9 @@ final class HotkeyManager {
     }
 
     /// 錄製新組合鍵期間暫停，避免按到現有快捷鍵時觸發
-    func pause() { unregister() }
+    func pause() { paused = true; unregister() }
     func resume() {
+        paused = false
         if let l = last { register(keyCode: l.keyCode, modifiersRaw: l.mods, enabled: l.enabled) }
     }
 
@@ -47,6 +49,8 @@ final class HotkeyManager {
             return noErr
         }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handlerRef)
     }
+
+    static func validKeyCode(_ code: Int) -> Bool { (0...127).contains(code) }
 
     // MARK: - 顯示用
 

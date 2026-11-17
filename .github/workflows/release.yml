@@ -13,6 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Run regression tests
+        run: swift test
+
       - name: Import signing certificate
         env:
           P12_BASE64: ${{ secrets.CODESIGN_P12_BASE64 }}

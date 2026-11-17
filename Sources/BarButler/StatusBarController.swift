@@ -57,13 +57,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var adjustDepth = 0
     private var isAdjusting: Bool { adjustDepth > 0 }
     private var peekRestoreCollapsed = false
-    private var forwardToken = 0
     private var validateWork: DispatchWorkItem?
     private var hoverWork: DispatchWorkItem?
     private var boundaryVisible = false
     private var clickAwayMonitor: Any?
     private var dragMonitors: [Any] = []
-    private var forwardPending = false
+    private var forwardPending: Bool { singleItemPresenter.isActive }
+    private lazy var singleItemPresenter = SingleItemPresenter(owner: self)
     private var lastForwardTime = Date.distantPast
     private var borrowed = false
     private var normalMainMenu: NSMenu?
@@ -103,6 +103,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     var arrowScreenFrame: NSRect? { toggleItem?.button?.window?.frame }
     var arrowScreenMinX: CGFloat? { arrowScreenFrame?.minX }
     var isBorrowingMenuBar: Bool { borrowed }
+    var singleItemInteractionActive: Bool { forwardPending }
 
     override init() {
         collapsed = prefs.collapsed
@@ -115,6 +116,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         observePositionDefaults()
         installDragMonitors()
         startWatchdog()
+        singleItemPresenter.resume()
 
         SystemMonitor.shared.onSettled { [weak self] why in self?.systemSettled(why) }
         SystemMonitor.shared.onWillSleep { [weak self] in self?.prepareForSleep() }
@@ -306,7 +308,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func validatePositions() {
-        guard !isAdjusting, !editing, !collapsed, SystemMonitor.shared.isStable else { return }
+        guard !isAdjusting, !editing, !forwardPending, !collapsed, SystemMonitor.shared.isStable else { return }
         if !pusherAdjacent { syncPusher(); return }   // 使用者拖動了 ‹ → pusher 自動跟上
         if alwaysSepMisplaced { healAlwaysSep(); return }
         backupPositions()
@@ -368,12 +370,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         validateWork?.cancel()
         offscreenStrikes = 0
         ItemMover.cancelRequested = true      // 移動中途要睡了：停下來，醒來後再歸位
-        endForward()
+        singleItemPresenter.suspend()
         restoreMenuBarIfBorrowed()
         floatBar.close()
     }
 
     private func systemSettled(_ why: String) {
+        singleItemPresenter.resume()
         if !menuOpen { toggleItem.menu = nil }
         recoveryAttempts.removeAll()          // 新的過渡期：修復與歸位的退避重新計算
         restoreBackoffUntil = .distantPast
@@ -516,7 +519,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     var healthSummary: String {
-        "collapsed=\(collapsed) editing=\(editing) adjacent=\(pusherAdjacent) onScreen=\(toggleOnScreen) "
+        "singleItem=\(singleItemPresenter.summary) collapsed=\(collapsed) editing=\(editing) adjacent=\(pusherAdjacent) onScreen=\(toggleOnScreen) "
             + "pos=\(position("BB_Toggle").map { String($0) } ?? "nil")/\(position("BB_Pusher").map { String($0) } ?? "nil") "
             + "backup=\(positionBackup.map { String($0) } ?? "nil") repairs=\(repairCount) note=\(lastHealthNote)"
     }
@@ -554,6 +557,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // MARK: - 收合／展開
 
     func setCollapsed(_ c: Bool, reason: ExpandReason = .click) {
+        guard c || !forwardPending else { return }
         // 收合前先確保 pusher 貼緊 ‹，才會把正確的區塊藏起來
         if c, !collapsed, !pusherAdjacent {
             syncPusher { [weak self] in self?.reallySetCollapsed(true, reason: reason) }
@@ -616,7 +620,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 快速一覽：全部顯示 N 秒後恢復
     func peek(seconds: TimeInterval = 5) {
-        guard !peeking, !editing else { return }
+        guard !peeking, !editing, !forwardPending else { return }
         peeking = true
         let restoreCollapsed = collapsed
         let restoreRevealed = alwaysRevealed
@@ -683,6 +687,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 由使用者點擊觸發（面板右鍵選單）：必要時「當下」借用選單列騰出空間，再交給 ItemMover
     func moveItem(_ item: BarItem, to dest: BarSection) {
+        guard !forwardPending else { Toast.show(L.moveBusy.s, kind: .info, near: arrowScreenFrame); return }
         guard item.section != dest else { return }
         // 先把一定會失敗的情況擋掉，免得白白借用選單列（借了就得確定會還）
         let blocker: String? = !item.movable ? L.itemLocked.s
@@ -713,6 +718,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 「全部收起」：‹ 移到最右端（其他圖示全部進收合區）；「全部顯示」：‹ 移到最左端
     func relocateToggle(rightEnd: Bool) {
+        guard !forwardPending else { Toast.show(L.moveBusy.s, kind: .info, near: arrowScreenFrame); return }
         Log.event("relocate ‹ → \(rightEnd ? "right end" : "left end")")
         recreateToggle(at: rightEnd ? 1.0 : 99_999)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
@@ -724,14 +730,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 以目前畫面為準記住每個圖示的區塊（使用者確認過的整體配置：全部收起／顯示、開啟記憶）
     func rememberLayout(_ reason: String) {
-        guard prefs.rememberLayout, AXPresser.trusted else { return }
-        LayoutMemory.shared.record(snapshot(), reason: reason)
+        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending else { return }
+        LayoutMemory.shared.record(layoutSnapshot(), reason: reason)
     }
 
     /// 使用者移動了一個圖示：只記這一個（其他圖示若正等著歸位，不能順便把錯的位置記下來）。
     /// 還沒有任何記憶時，以目前整條選單列為起點。
     func rememberMove(_ windowID: Int, to dest: BarSection) {
-        guard prefs.rememberLayout, AXPresser.trusted else { return }
+        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending else { return }
         let snap = snapshot()
         if LayoutMemory.shared.pins.isEmpty {
             LayoutMemory.shared.record(snap, reason: "first move")
@@ -743,7 +749,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 使用者自己 ⌘ 拖曳完：和拖曳前（上次健康檢查）比對，只記換了區塊的圖示
     private func rememberUserArrangement() {
-        guard prefs.rememberLayout, AXPresser.trusted else { return }
+        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending else { return }
         let snap = snapshot()
         if LayoutMemory.shared.pins.isEmpty || lastKnownSections.isEmpty {
             LayoutMemory.shared.record(snap, reason: "user ⌘-drag")
@@ -766,6 +772,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     func restoreLayoutIfNeeded(_ why: String, attempt: Int = 0, force: Bool = false) {
         guard prefs.rememberLayout, AXPresser.trusted, !restoreInFlight, SystemMonitor.shared.isStable else { return }
         guard force || Date() >= restoreBackoffUntil else { restorePending = true; return }   // 剛因空間不足失敗過：退避中
+        guard !forwardPending else { restorePending = true; return }
         let snap = snapshot()
         let all = LayoutMemory.shared.mismatches(snap, alwaysEnabled: prefs.alwaysHiddenEnabled)
         pendingRestoreCount = all.count
@@ -838,7 +845,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 使用者在面板按「歸位」：在點擊當下借用選單列騰出空間（之後才借會被系統拒絕），立刻歸位
     func restoreNow() {
-        guard AXPresser.trusted, SystemMonitor.shared.canPostEvents, !restoreInFlight, !ItemMover.isMoving else { return }
+        guard AXPresser.trusted, SystemMonitor.shared.canPostEvents, !restoreInFlight, !ItemMover.isMoving, !forwardPending else { return }
         if !(NSApp.isActive && NSApp.activationPolicy() == .regular) { borrowMenuBar() }
         restoreBackoffUntil = .distantPast
         restoreBackoff = 30
@@ -863,61 +870,21 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     // MARK: - 面板代點（FloatBar 呼叫）
 
-    /// 一步到位：展開 → 等目標「真的顯示」→ 合成點擊。若 0.6 秒後仍被藏（選單列空間不足），
-    /// 借用選單列：讓 BarButler 短暫成為前景 App 騰出左側空間，收合時自動切回原 App。
+    /// Panel and URL clicks share the same one-item-only presentation path.
     func forwardClick(toWindow id: Int, name: String) {
-        // 必須在使用者點擊事件的同一時刻決定是否借位：macOS 14+ 只在互動當下允許 App 自行成為前景
-        if needsRoom(forTarget: id) { borrowMenuBar() }
-        let inAlways = snapshot(details: false).item(id)?.section == .alwaysHidden
-        beginForward()
-        if inAlways, !alwaysRevealed { alwaysRevealed = true; apply() }   // 永久隱藏區的圖示：暫時展開那一區
-        var attempts = 0
-        var stable = 0
-        func tick() {
-            guard forwardPending else { return }
-            attempts += 1
-            // 借位時要等我們真的成為前景（選單列已切換），且目標連續兩次輪詢都在畫面上才點，
-            // 避免在選單列切換的瞬間誤點到前景 App 的選單
-            let ready = !borrowed || NSApp.isActive
-            if ready, let b = AXPresser.onscreenBounds(windowID: id) {
-                stable += 1
-                if stable >= 2 {
-                    Log.panel.info("forward click → \(name, privacy: .public) at x=\(Int(b.midX)) after \(attempts) polls borrowed=\(self.borrowed) active=\(NSApp.isActive)")
-                    AXPresser.click(at: CGPoint(x: b.midX, y: b.midY))
-                    endForward()
-                    return
-                }
-            } else {
-                stable = 0
-            }
-            if attempts == 5, !borrowed { borrowMenuBar() }   // 備援：預測失準時再試一次（可能被系統拒絕）
-            if attempts >= 24 {
-                Log.event("forward failed: \(name) never became visible")
-                Toast.show(L.toastOverflow.f(1), kind: .warning, near: arrowScreenFrame)
-                endForward()
-                return
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { tick() }
-        }
-        tick()
-    }
-
-    func beginForward() {
+        SystemMonitor.shared.noteUserActivity()
         lastForwardTime = Date()
-        forwardPending = true
-        forwardToken += 1
-        let token = forwardToken
-        if collapsed { setCollapsed(false, reason: .forward) } else { expandReason = .forward }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in   // 安全網（只管這一次）
-            guard let s = self, s.forwardToken == token else { return }
-            s.endForward()
-        }
+        singleItemPresenter.open(windowID: id, name: name)
     }
 
-    func endForward() {
-        guard forwardPending else { return }
-        forwardPending = false
-        if !collapsed { scheduleCollapse(after: 1.0) }
+    var canPresentSingleItem: Bool {
+        !editing && !peeking && !isAdjusting && !restoreInFlight && !arranging && !menuOpen
+    }
+
+    func layoutSnapshot() -> BarSnapshot { singleItemPresenter.logicalSnapshot(snapshot()) }
+
+    func singleItemInteractionDidEnd() {
+        lastKnownSections = Self.sections(of: snapshot(details: false))
     }
 
     // MARK: - 借用選單列（空間不足時）
@@ -1222,10 +1189,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // NSTrackingArea 呼叫的是 Objective-C 選擇器 mouseEntered: / mouseExited:，必須明確標註
     @objc(mouseEntered:) func mouseEntered(_ event: NSEvent) {
         Log.core.info("mouseEntered hover=\(self.prefs.hoverToExpand) collapsed=\(self.collapsed)")
-        guard prefs.hoverToExpand, toggleItem.menu == nil, !editing else { return }
+        guard prefs.hoverToExpand, toggleItem.menu == nil, !editing, !forwardPending else { return }
         hoverWork?.cancel()
         let w = DispatchWorkItem { [weak self] in
-            guard let s = self, s.prefs.hoverToExpand, !s.editing else { return }
+            guard let s = self, s.prefs.hoverToExpand, !s.editing, !s.forwardPending else { return }
             // 觸發當下再確認滑鼠真的還停在 ‹ 上：路過不誤觸，也不受 AppKit 偶發的瞬間 exit 雜訊影響
             guard let f = s.arrowScreenFrame, f.insetBy(dx: -4, dy: -4).contains(NSEvent.mouseLocation) else { return }
             SystemMonitor.shared.noteUserActivity()
@@ -1322,6 +1289,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // MARK: - 重設位置
 
     func resetPositions() {
+        LayoutMemory.shared.forget()
         let d = UserDefaults.standard
         for name in ["BB_Toggle", "BB_HideSep", "BB_Pusher", "BB_AlwaysSep"] {
             d.removeObject(forKey: "NSStatusItem Preferred Position \(name)")

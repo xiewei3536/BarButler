@@ -25,7 +25,7 @@ final class ItemMover {
     func move(windowID: Int, to dest: BarSection, via c: StatusBarController, interactive: Bool = true) async throws {
         guard AXPresser.trusted else { throw Failure.permission }
         guard SystemMonitor.shared.canPostEvents else { throw Failure.locked }
-        guard !busy else { throw Failure.busy }
+        guard !busy, !c.singleItemInteractionActive else { throw Failure.busy }
         busy = true
         Self.cancelRequested = false
         defer { busy = false }
@@ -79,6 +79,83 @@ final class ItemMover {
         throw Failure.didNotMove
     }
 
+    /// A window-addressed transfer: never expands either hidden section, never
+    /// enters layout editing, and never writes the user's remembered layout.
+    func moveIsolated(windowID: Int, to destination: ItemMoveDestination,
+                      via c: StatusBarController) async throws {
+        guard AXPresser.trusted else { throw Failure.permission }
+        guard SystemMonitor.shared.canPostEvents else { throw Failure.locked }
+        guard !busy, NSEvent.pressedMouseButtons == 0 else { throw Failure.busy }
+        try Task.checkCancellation()
+        busy = true
+        Self.cancelRequested = false
+        defer { busy = false }
+        guard let initial = c.snapshot(details: false).item(windowID) else { throw Failure.notFound }
+        guard initial.movable else { throw Failure.unmovable }
+        guard destination.windowID != windowID else { return }
+        let before = Dictionary(c.snapshot(details: false).items.map { ($0.windowID, $0.section) },
+                                uniquingKeysWith: { a, _ in a })
+
+        for attempt in 1...2 {
+            try checkCancelled()
+            guard let src = AXPresser.bounds(windowID: windowID),
+                  let target = AXPresser.bounds(windowID: destination.windowID),
+                  let source = CGEventSource(stateID: .hidSystemState) else { throw Failure.notFound }
+            let drop = destination.point(in: target)
+            // Starting outside every display avoids hitting any real on-screen UI.
+            let farX = (NSScreen.screens.map { $0.frame.maxX }.max() ?? 0) + 10_000
+            let farY = (NSScreen.screens.map { abs($0.frame.minY) + $0.frame.height }.max() ?? 0) + 10_000
+            guard let down = DirectedMenuBarEvent.make(.leftMouseDown, point: CGPoint(x: farX, y: farY),
+                        windowID: windowID, pid: initial.pid, source: source, command: true),
+                  let up = DirectedMenuBarEvent.make(.leftMouseUp, point: drop,
+                        windowID: destination.windowID, pid: initial.pid, source: source),
+                  let release = DirectedMenuBarEvent.make(.leftMouseUp, point: CGPoint(x: src.midX, y: src.midY),
+                        windowID: windowID, pid: initial.pid, source: source) else { throw Failure.didNotMove }
+            let permit: CGEventFilterMask = [.permitLocalMouseEvents, .permitLocalKeyboardEvents, .permitSystemDefinedEvents]
+            for state in [CGEventSuppressionState.eventSuppressionStateRemoteMouseDrag, .eventSuppressionStateSuppressionInterval] {
+                source.setLocalEventsFilterDuringSuppressionState(permit, state: state)
+            }
+            source.localEventsSuppressionInterval = 0
+            let original = CGEvent(source: nil)?.location
+            let display = CGMainDisplayID()
+            CGDisplayHideCursor(display)
+            var released = false
+            do {
+                defer {
+                    // A timeout, sleep or cancellation must never leave a mouse button down.
+                    if !released {
+                        release.post(tap: .cgSessionEventTap)
+                        release.postToPid(initial.pid)
+                    }
+                    if let original { CGWarpMouseCursorPosition(original) }
+                    CGDisplayShowCursor(display)
+                }
+                try await DirectedMenuBarEvent(event: down, pid: initial.pid).deliver()
+                await sleep(0.06)
+                try checkCancelled()
+                try await DirectedMenuBarEvent(event: up, pid: initial.pid).deliver()
+                released = true
+            }
+            for _ in 0..<10 {
+                await sleep(0.06)
+                try checkCancelled()
+                let snap = c.snapshot(details: false)
+                guard let now = snap.item(windowID),
+                      let anchor = AXPresser.bounds(windowID: destination.windowID) else { throw Failure.notFound }
+                let gap = destination.side == .before ? now.frame.maxX - anchor.minX : now.frame.minX - anchor.maxX
+                guard abs(gap) <= 3 else { continue }
+                let collateral = snap.items.contains { other in
+                    other.windowID != windowID && before[other.windowID].map { $0 != other.section } == true
+                }
+                guard !collateral else { throw Failure.collateral }
+                Log.event("isolated move #\(windowID) \(destination.side.rawValue) #\(destination.windowID) ✓")
+                return
+            }
+            Log.event("isolated move #\(windowID): retry \(attempt)")
+        }
+        throw Failure.didNotMove
+    }
+
     /// 移動失敗時給使用者看的說明
     static func message(for error: Error, label: String) -> String {
         switch error as? Failure {
@@ -94,7 +171,7 @@ final class ItemMover {
     // MARK: - 細節
 
     private func checkCancelled() throws {
-        if Self.cancelRequested || !SystemMonitor.shared.canPostEvents { throw Failure.cancelled }
+        if Task.isCancelled || Self.cancelRequested || !SystemMonitor.shared.canPostEvents { throw Failure.cancelled }
     }
 
     /// 輪詢直到來源圖示與目標錨點都真的在畫面上、且位置連續兩次不變（最多約 2 秒）

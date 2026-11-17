@@ -68,9 +68,9 @@ enum L {
     static let previewMenubar = Tr("Click or hover ‹ — hidden icons slide out in the menu bar",
                                    "點擊或懸停 ‹ ── 隱藏的圖示在選單列中滑出",
                                    "点击或悬停 ‹ —— 隐藏的图标在菜单栏中滑出")
-    static let previewFloat = Tr("Click ‹ — hidden icons appear in a panel below; click one to open its menu",
-                                 "點擊 ‹ ── 隱藏的圖示顯示在下方面板；點一下就開啟它的選單",
-                                 "点击 ‹ —— 隐藏的图标显示在下方面板；点一下就打开它的菜单")
+    static let previewFloat = Tr("Click ‹ — choose an icon below; only that icon appears in the menu bar",
+                                 "點擊 ‹ ── 在下方面板選擇圖示；只將該圖示暫時顯示在選單列",
+                                 "点击 ‹ —— 在下方面板选择图标；仅将该图标临时显示在菜单栏")
 
     // MARK: 設定 — 一般
     static let rowLanguage = Tr("Language", "語言", "语言")
@@ -286,6 +286,22 @@ enum L {
     static let cmdMove = Tr("Move an icon", "移動圖示", "移动图标")
     static let cmdArrange = Tr("Arrange icons", "整理圖示", "整理图标")
     static let cmdDiagnose = Tr("Diagnostic report", "診斷報告", "诊断报告")
+
+    static let searchIcons = Tr("Search icons or apps…", "搜尋圖示或應用程式…", "搜索图标或应用…")
+    static let searchNoResults = Tr("No matching icons in this section", "此區沒有符合的圖示", "此区没有匹配的图标")
+    static let clearSearch = Tr("Clear search", "清除搜尋", "清除搜索")
+    static let singleItemHint = Tr("Only the icon you click appears in the menu bar", "只在選單列顯示你點選的圖示", "只在菜单栏显示你点击的图标")
+    static let singleItemDetail = Tr("It returns to its hidden section after its menu closes.", "選單關閉後，自動回到原本的隱藏區。", "菜单关闭后，自动回到原来的隐藏区。")
+    static let resetConfirmTitle = Tr("Reset menu bar positions?", "確定重設選單列位置？", "确定重置菜单栏位置？")
+    static let resetConfirmBody = Tr("This moves BarButler's divider to the right and clears the saved layout. Other preferences are kept.",
+                                    "這會將分隔圖示移回右側並清除記住的圖示配置；其他偏好設定不變。",
+                                    "这会将分隔图标移回右侧并清除记住的图标布局；其他偏好设置不变。")
+    static let cancel = Tr("Cancel", "取消", "取消")
+
+    // MARK: Isolated panel clicks
+    static let singleItemFailed = Tr("Couldn't open that icon on its own. Other icons have stayed hidden; try again or use Arrange Icons.",
+                                     "無法單獨開啟此圖示；其他圖示仍保持隱藏。請重試或使用「整理圖示」。",
+                                     "无法单独打开此图标；其他图标仍保持隐藏。请重试或使用“整理图标”。")
 
     // MARK: 新手教學
     static let obTitle = Tr("Welcome to BarButler", "歡迎使用選單列管家", "欢迎使用菜单栏管家")

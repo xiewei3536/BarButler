@@ -95,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let arg = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
         let query = Dictionary(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
             .compactMap { q in q.value.map { (q.name.lowercased(), $0) } } ?? [], uniquingKeysWith: { a, _ in a })
-        Log.event("url: \(url.absoluteString)")
+        Log.event("automation: \(cmd)")
         switch cmd {
         case "toggle":               sc.toggle()
         case "show", "expand":       sc.show()
@@ -127,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func findItem(_ key: String, in sc: StatusBarController) -> BarItem? {
+        guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let items = sc.snapshot().items
         return items.first { String($0.windowID) == key }
             ?? items.first { $0.label.lowercased() == key }
@@ -232,7 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let pid = ProcessInfo.processInfo.processIdentifier
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done; /usr/bin/open \"\(path)\""]
+        p.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; /usr/bin/open \"$2\"", "barbutler-relaunch", String(pid), path]
         try? p.run()
         NSApp.terminate(nil)
     }

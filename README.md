@@ -19,6 +19,9 @@ A tiny, native menu bar manager for macOS — hide the icons you rarely use behi
 
 ## Features
 
+- **Focused panel clicks (new in 1.5)** — click an icon in the floating panel to bring out **only that icon** and open its menu. Every other hidden icon stays hidden. It returns to its original section when the menu closes, including Always Hidden. Rapid clicks and app restarts are handled safely.
+- **Faster arranging** — searchable icon/app names, a clearer layout overview, keyboard grid navigation, scrollable long panels, and confirmation before resetting your layout.
+
 - **One-icon design** — the `‹` chevron is both the divider and the toggle. Anything to its left gets tucked away. No clutter added while removing clutter.
 - **Arrange Icons (new in 1.4)** — a visual layout editor: drag icons between *Always Shown*, *Hidden* and *Always Hidden*, or right-click one. BarButler moves the real menu bar icon for you — no fiddly ⌘-dragging. Right-click an icon in the floating panel to keep it in the menu bar.
 - **Remembers your layout (new in 1.4)** — if a restart, an app update or a crowded menu bar shuffles your icons, BarButler moves them back to the section you chose (it waits until you're idle and there's room).
@@ -84,3 +87,20 @@ Same trick as Hidden Bar / Dozer: an invisible 1-pt status item sits just left o
 ## License
 
 [MIT](LICENSE) © 2026 Bowei
+
+## Development & verification
+
+```sh
+swift build
+bash scripts/test.sh  # XCTest with full Xcode; same checks via an adapter with Command Line Tools
+bash build.sh        # VERSION file → signed universal app + DMG in dist/
+```
+
+`swift test` requires a full Xcode installation (Command Line Tools does not ship XCTest).
+`build.sh` defaults to `VERSION`; an explicit `VERSION=1.5.0` override is also supported.
+App-level checks for isolated clicks should cover: a hidden icon, an Always Hidden
+icon, an already shown icon, quick consecutive clicks, dismissal of menus/popovers,
+and relaunch with a pending return ticket. The other hidden icons must never appear.
+These interactive checks require Accessibility; unit tests do not request permissions.
+
+See [CHANGELOG.md](CHANGELOG.md) for the 1.5.0 changes.

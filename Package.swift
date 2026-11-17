@@ -18,6 +18,7 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("ServiceManagement")
             ]
-        )
+        ),
+        .testTarget(name: "BarButlerTests", dependencies: ["BarButler"])
     ]
 )

@@ -320,6 +320,7 @@ struct AdvancedTab: View {
     @State private var axTrusted = AXPresser.trusted
     @State private var copied: String?
     @State private var healthTick = 0
+    @State private var confirmReset = false
     private let ticker = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     private var healthText: String {
@@ -453,10 +454,16 @@ struct AdvancedTab: View {
             Card {
                 SettingRow(icon: "arrow.counterclockwise", color: .gray, title: L.rowReset.s, subtitle: L.rowResetSub.s) {
                     Button(role: .destructive) {
-                        NotificationCenter.default.post(name: .bbResetPositions, object: nil)
+                        confirmReset = true
                     } label: {
                         Text(L.btnReset.s)
                     }
+                    .confirmationDialog(L.resetConfirmTitle.s, isPresented: $confirmReset, titleVisibility: .visible) {
+                        Button(L.btnReset.s, role: .destructive) {
+                            NotificationCenter.default.post(name: .bbResetPositions, object: nil)
+                        }
+                        Button(L.cancel.s, role: .cancel) { }
+                    } message: { Text(L.resetConfirmBody.s) }
                 }
             }
         }
@@ -492,6 +499,10 @@ struct HotkeyRecorder: View {
         .buttonStyle(.plain)
         .help(L.clickToSet.s)
         .onDisappear { stop() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
+            if (notification.object as? NSWindow)?.identifier?.rawValue == "BBSettings" { stop() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in stop() }
     }
 
     private func start() {
@@ -512,6 +523,7 @@ struct HotkeyRecorder: View {
     }
 
     private func stop() {
+        guard recording || monitor != nil else { return }
         recording = false
         if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
         HotkeyManager.shared.resume()

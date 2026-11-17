@@ -5,7 +5,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="BarButler"
-VERSION="${VERSION:-1.4.1}"
+VERSION="${VERSION:-$(cat VERSION)}"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Invalid VERSION: expected major.minor.patch" >&2
+    exit 2
+fi
 BUNDLE_ID="com.bowei.barbutler"
 DIST="dist"
 FEED_URL="https://raw.githubusercontent.com/xiewei3536/BarButler/main/appcast.xml"
@@ -15,7 +19,7 @@ echo "▸ 編譯 Universal Binary (x86_64 + arm64)…  版本 $VERSION"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-if swift build -c release --arch x86_64 --arch arm64 2>/dev/null; then
+if swift build -c release --arch x86_64 --arch arm64; then
     UNIVERSAL="$(swift build -c release --arch x86_64 --arch arm64 --show-bin-path)/$APP"
 else
     echo "  （合併模式不支援，改用分別編譯 + lipo）"
@@ -49,7 +53,7 @@ cp "$DIST/AppIcon.icns" "$RES/"
 printf 'APPL????' > "$BUNDLE/Contents/PkgInfo"
 
 echo "▸ 嵌入 Sparkle.framework…"
-SPARKLE_FRAMEWORK=$(find .build/artifacts -type d -name "Sparkle.framework" -path "*macos*" | head -1)
+SPARKLE_FRAMEWORK=$(find .build/artifacts -type d -name "Sparkle.framework" -path "*macos*" -print -quit)
 cp -R "$SPARKLE_FRAMEWORK" "$FRAMEWORKS/"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$BUNDLE/Contents/MacOS/$APP" 2>/dev/null || true
 
@@ -115,7 +119,8 @@ codesign --force -s "$SIGN_ID" "$SPK/Autoupdate"
 codesign --force -s "$SIGN_ID" "$SPK/Updater.app"
 codesign --force -s "$SIGN_ID" "$FRAMEWORKS/Sparkle.framework"
 codesign --force --deep -s "$SIGN_ID" "$BUNDLE"
-codesign --verify --deep --strict "$BUNDLE" && echo "  簽名驗證通過"
+codesign --verify --deep --strict "$BUNDLE"
+echo "  簽名驗證通過"
 
 echo "▸ 製作 DMG…"
 STAGE="$DIST/dmg-stage"
