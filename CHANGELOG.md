@@ -37,4 +37,5 @@
   Automation logs omit full query strings; relaunch paths use shell arguments.
 - Updated Sparkle to 2.10.1 and moved release builds off the retired runner.
 - Added automated regression coverage and CI on Intel and Apple Silicon runners. Release jobs
-  run tests before signing, and signature verification failures stop packaging.
+  run tests before signing, signing keys are passed through stdin instead of a
+  plaintext temporary file, and signature verification failures stop packaging.

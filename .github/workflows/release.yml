@@ -53,11 +53,8 @@ jobs:
             exit 0
           fi
           echo "APPCAST=1" >> "$GITHUB_ENV"
-          umask 077
-          echo "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_key
-          SIGN_TOOL=$(find .build/artifacts -type f -name sign_update -path "*/bin/*" | head -1)
-          SIGNATURE=$("$SIGN_TOOL" --ed-key-file /tmp/sparkle_key dist/BarButler.dmg)
-          rm -f /tmp/sparkle_key
+          SIGN_TOOL=$(find .build/artifacts -type f -name sign_update -path "*/bin/*" -print -quit)
+          SIGNATURE=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SIGN_TOOL" --ed-key-file - dist/BarButler.dmg)
           echo "SIGNATURE=$SIGNATURE" >> "$GITHUB_ENV"
 
       - name: Generate appcast.xml
