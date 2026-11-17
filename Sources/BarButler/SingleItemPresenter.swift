@@ -181,6 +181,7 @@ final class SingleItemPresenter {
     @MainActor private func present(_ request: Request, via owner: StatusBarController) async throws {
         try Task.checkCancellation()
         guard SystemMonitor.shared.canPostEvents else { throw ItemMover.Failure.locked }
+        guard owner.canPresentSingleItem, !ItemMover.isMoving else { throw ItemMover.Failure.busy }
         // A panel may also be opened while the menu bar was manually expanded.
         // Collapse it first; the one requested item is the only temporary addition.
         if !owner.collapsed {
