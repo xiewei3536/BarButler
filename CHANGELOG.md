@@ -24,7 +24,8 @@
 - Internal drag tokens prevent external text drops from replaying a stale move.
 - Layout refresh timers stop when Settings closes and resume when it reopens.
 - Shortcut recording now reliably resumes the global hotkey after window closure
-  or focus loss, and corrupt key-code preferences no longer risk an integer trap.
+  or focus loss. Corrupt key-code preferences no longer risk an integer trap,
+  and the letter F is no longer mistaken for an unmodified function-key shortcut.
 
 ### Reliability / 穩定性 / 稳定性
 

@@ -162,6 +162,15 @@ final class SingleItemPresentationTests: XCTestCase {
         XCTAssertFalse(HotkeyManager.validKeyCode(Int.max))
     }
 
+    func testLetterFIsNotMistakenForAnUnmodifiedFunctionKey() {
+        XCTAssertFalse(HotkeyManager.validShortcut(keyCode: 3, modifiersRaw: 0))
+        XCTAssertFalse(HotkeyManager.validShortcut(keyCode: 3, modifiersRaw: NSEvent.ModifierFlags.shift.rawValue))
+        XCTAssertTrue(HotkeyManager.validShortcut(keyCode: 3, modifiersRaw: NSEvent.ModifierFlags.command.rawValue))
+        XCTAssertTrue(HotkeyManager.validShortcut(keyCode: 122, modifiersRaw: 0))
+        XCTAssertFalse(HotkeyManager.validShortcut(keyCode: 49, modifiersRaw: 0))
+        XCTAssertFalse(HotkeyManager.validShortcut(keyCode: -1, modifiersRaw: NSEvent.ModifierFlags.command.rawValue))
+    }
+
     func testDropPointsLandInsideTheCorrectHalfOfAnchor() {
         let frame = CGRect(x: -5000, y: 0, width: 5016, height: 24)
         XCTAssertEqual(ItemMoveDestination(windowID: 1, side: .before).point(in: frame), CGPoint(x: -4999, y: 12))

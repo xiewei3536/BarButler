@@ -14,7 +14,7 @@ final class HotkeyManager {
     func register(keyCode: Int, modifiersRaw: UInt, enabled: Bool) {
         last = (keyCode, modifiersRaw, enabled)
         unregister()
-        guard enabled, !paused, Self.validKeyCode(keyCode) else { return }
+        guard enabled, !paused, Self.validShortcut(keyCode: keyCode, modifiersRaw: modifiersRaw) else { return }
         installHandlerIfNeeded()
         let flags = NSEvent.ModifierFlags(rawValue: modifiersRaw)
         var carbon: UInt32 = 0
@@ -51,6 +51,16 @@ final class HotkeyManager {
     }
 
     static func validKeyCode(_ code: Int) -> Bool { (0...127).contains(code) }
+
+    static func validShortcut(keyCode: Int, modifiersRaw: UInt) -> Bool {
+        guard validKeyCode(keyCode) else { return false }
+        let flags = NSEvent.ModifierFlags(rawValue: modifiersRaw)
+        if !flags.intersection([.command, .option, .control]).isEmpty { return true }
+        // The letter F is not a function key. Bare letters must never become
+        // global shortcuts and consume ordinary typing, even with Shift held.
+        guard let name = keyNames[keyCode], name.hasPrefix("F"), name.count > 1 else { return false }
+        return name.dropFirst().allSatisfy(\.isNumber)
+    }
 
     // MARK: - 顯示用
 

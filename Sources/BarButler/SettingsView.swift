@@ -511,9 +511,8 @@ struct HotkeyRecorder: View {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { ev in
             if ev.keyCode == 53 { stop(); return nil } // Esc 取消
             let flags = ev.modifierFlags.intersection([.command, .option, .control, .shift])
-            let needsModifier = !(HotkeyManager.keyNames[Int(ev.keyCode)]?.hasPrefix("F") ?? false)
-            if needsModifier && flags.intersection([.command, .option, .control]).isEmpty {
-                return nil // 要求至少一個修飾鍵，避免吃掉一般輸入
+            guard HotkeyManager.validShortcut(keyCode: Int(ev.keyCode), modifiersRaw: flags.rawValue) else {
+                return nil // 要求至少一個修飾鍵（真正的 F1～F12 除外），避免吃掉一般輸入
             }
             prefs.hotkeyKeyCode = Int(ev.keyCode)
             prefs.hotkeyModifiers = flags.rawValue
