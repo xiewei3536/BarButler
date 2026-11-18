@@ -278,6 +278,9 @@ enum L {
                                    "把選單列配置與近期事件存成文字檔（回報問題時附上）",
                                    "把菜单栏配置与近期事件存成文本文件（反馈问题时附上）")
     static let btnDiagnose = Tr("Create Report", "產生報告", "生成报告")
+    static let toastRecoveryFailed = Tr("The menu bar could not be repaired. Reopen BarButler to access Settings; your saved layout is unchanged.",
+                                            "狀態列修復未成功。請重新開啟 BarButler 進入設定；已儲存的排列不會被清除。",
+                                            "状态栏修复未成功。请重新打开 BarButler 进入设置；已保存的排列不会被清除。")
     static let toastRecovered = Tr("Fixed: ‹ was out of place — your layout is unchanged",
                                    "已自動修正 ‹ 的位置──你的配置沒有變動", "已自动修正 ‹ 的位置——你的配置没有变动")
     static let toastCrowded = Tr("The menu bar is full and macOS is hiding ‹. Use %@, or move a few icons into Hidden (Arrange Icons…).",

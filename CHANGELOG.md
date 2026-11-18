@@ -1,10 +1,27 @@
 # Changelog
 
+## Unreleased — recovery hardening / 修復流程強化
+
+- Serialize divider repairs and verify their geometry before reporting success.
+  If both pusher-only attempts are ignored, rebuild only BarButler's own toggle
+  and pusher, preserving the saved toggle position and all remembered icon sections.
+- Cancel stale repair stages across display/system sleep, lock, session changes,
+  and display configuration transitions. Delayed checks from an older transition
+  cannot mutate a later recovery.
+- Bound failed repairs to two attempts per settled session, rather than retrying
+  the same failure indefinitely every ten minutes. Manual checks explicitly retry.
+- Prevent icon moves and layout recording from racing with anchor replacement.
+- Deterministically retain the oldest live instance on overlapping launches and
+  ask that instance to show Settings instead of silently ignoring another launch.
+- Added deterministic recovery/launch regression tests. **Not released:** real
+  sleep/wake, display-change and extended runtime validation remain release gates.
+
 ## 2026-11-18 — 1.5.0 distribution paused / 暫停推送 1.5.0
 
 - Paused automatic distribution of 1.5.0 after a report of an unavailable menu-bar
-  interface following display sleep/wake. Investigation found a live process and
-  repeated divider re-anchoring failures, not a recorded process crash.
+  interface. Investigation found a live process and repeated divider re-anchoring
+  failures that persisted through sleep/wake; the initiating trigger is unconfirmed.
+  No process crash report was found in the captured incident.
 - The stable update feed points back to 1.4.1 while the recovery path is verified.
   Existing 1.5.0 installations are not silently downgraded. Preferences and saved
   icon layouts must be retained during manual recovery.

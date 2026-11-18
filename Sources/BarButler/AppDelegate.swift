@@ -21,6 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsWindow: NSWindow?
     private var onboardingWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
+    private var reopenObserver: NSObjectProtocol?
+    private static let reopenNotification = Notification.Name("com.bowei.barbutler.reopen-existing")
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -28,6 +30,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !terminateIfDuplicate() else { return }   // 另一份正在執行：別再建一組同名的 ‹（會打亂位置）
+        if let bid = Bundle.main.bundleIdentifier {
+            reopenObserver = DistributedNotificationCenter.default().addObserver(
+                forName: Self.reopenNotification, object: bid, queue: .main) { [weak self] note in
+                guard note.userInfo?["pid"] as? Int == Int(getpid()) else { return }
+                self?.showSettings()
+            }
+        }
         buildMainMenu()
         Log.event("launch \(version) pid=\(getpid())")
 
@@ -219,9 +228,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func terminateIfDuplicate() -> Bool {
         guard let bid = Bundle.main.bundleIdentifier else { return false }
-        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
-            .filter { $0 != NSRunningApplication.current }
-        guard !others.isEmpty else { return false }
+        let current = NSRunningApplication.current
+        let identity = AppInstanceIdentity(pid: current.processIdentifier, launchedAt: current.launchDate)
+        // Choose the oldest *live* instance deterministically. If two launches
+        // overlap, they must not both decide to terminate because they saw each other.
+        let existing = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+            .filter { app in
+                !app.isTerminated && app.processIdentifier > 0
+                    && (kill(app.processIdentifier, 0) == 0 || errno == EPERM)
+                    && AppInstanceIdentity(pid: app.processIdentifier, launchedAt: app.launchDate).precedes(identity)
+            }
+            .min { lhs, rhs in
+                AppInstanceIdentity(pid: lhs.processIdentifier, launchedAt: lhs.launchDate)
+                    .precedes(AppInstanceIdentity(pid: rhs.processIdentifier, launchedAt: rhs.launchDate))
+            }
+        guard let existing else { return false }
+        DistributedNotificationCenter.default().postNotificationName(
+            Self.reopenNotification, object: bid, userInfo: ["pid": Int(existing.processIdentifier)],
+            deliverImmediately: true)
+        existing.activate(options: .activateIgnoringOtherApps)
+        Log.event("duplicate launch → show existing instance pid=\(existing.processIdentifier)")
         NSApp.terminate(nil)
         return true
     }

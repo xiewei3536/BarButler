@@ -91,7 +91,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     // 穩定守護
     private var offscreenStrikes = 0
-    private var recoveryAttempts: [Date] = []   // 修復退避：10 分鐘內最多 2 次，之後等下一次系統過渡再試
+    private var repairBudget = StatusItemRepairBudget()
+    private let dividerRecovery = StatusItemRecovery()
+    private var collapseRequest: UInt64 = 0
     private var overflowStrikes = 0
     private(set) var lastHealthCheck: Date?
     private(set) var lastHealthNote = "—"
@@ -104,6 +106,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     var arrowScreenMinX: CGFloat? { arrowScreenFrame?.minX }
     var isBorrowingMenuBar: Bool { borrowed }
     var singleItemInteractionActive: Bool { forwardPending }
+    var isRepairingStatusItems: Bool { isAdjusting || dividerRecovery.isRunning }
 
     override init() {
         collapsed = prefs.collapsed
@@ -246,44 +249,87 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return ScreenGeometry.xOnSomeScreen(w.frame.midX)
     }
 
-    /// 確保 pusher 就位後再執行後續動作（收合前必經）。過渡期不重建，交給穩定後的健康檢查。
-    private func syncPusher(then completion: (() -> Void)? = nil) {
-        guard !collapsed, !editing, !pusherAdjacent, SystemMonitor.shared.isStable else { completion?(); return }
-        Log.event("divider not next to ‹ → re-anchor")
-        beginAdjust()
-        buildPusher()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let s = self else { return }
-            if !s.pusherAdjacent, let g = s.toggleGeometryDistance {
-                s.buildPusher(anchor: g)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                s.endAdjust()
-                s.apply()
-                if !s.pusherAdjacent { Log.event("re-anchor failed; will retry on next check") }
-                completion?()
-            }
-        }
+    private var canRecoverAnchors: Bool {
+        SystemMonitor.shared.isStable && !SystemMonitor.shared.screenLocked
+            && !editing && !forwardPending && !arranging && !ItemMover.isMoving && !menuOpen
     }
 
-    /// 只重建我們自己的項目（不碰其他 App）；先刪除再寫入位置，最後再補寫一次（刪除可能是延遲生效）
-    private func recreateToggle(at value: Double, completion: (() -> Void)? = nil) {
-        Log.event("recreate ‹ at position \(value)")
+    /// Serialize repairs, verify each result, then rebuild only our two anchors
+    /// if AppKit ignores both saved-position and geometry-based pusher placement.
+    private func syncPusher(then completion: StatusItemRecovery.Completion? = nil) {
+        if dividerRecovery.isRunning {
+            if let completion { dividerRecovery.join(completion) }
+            return
+        }
+        guard !collapsed, canRecoverAnchors else { completion?(.cancelled); return }
+        guard !pusherAdjacent else { completion?(.recovered); return }
+        let generation = SystemMonitor.shared.generation
+        let savedAnchor = positionBackup ?? position("BB_Toggle") ?? toggleGeometryDistance ?? 1.0
+        Log.event("divider not next to ‹ → verified re-anchor")
         beginAdjust()
+        dividerRecovery.recover(canContinue: { [weak self] in
+            guard let s = self else { return false }
+            return generation == SystemMonitor.shared.generation && !s.collapsed && s.canRecoverAnchors
+        }, isHealthy: { [weak self] in
+            self?.pusherAdjacent == true && self?.toggleOnScreen == true
+        }, perform: { [weak self] stage in
+            guard let s = self else { return }
+            switch stage {
+            case .preferredPosition: s.buildPusher(anchor: savedAnchor)
+            case .geometry:
+                if let distance = s.toggleGeometryDistance { s.buildPusher(anchor: distance) }
+            case .recreateAnchors:
+                Log.event("pusher re-anchor ignored → recreate own anchors at \(savedAnchor)")
+                s.rebuildOwnAnchors(at: savedAnchor)
+            }
+            s.apply()
+        }, completion: { [weak self] outcome in
+            guard let s = self else { return }
+            s.endAdjust()
+            s.apply()
+            switch outcome {
+            case .recovered:
+                s.writeOwnPositions(force: true)
+                s.lastHealthNote = "divider recovered"
+                Log.event("divider recovery verified")
+            case .failed:
+                s.lastHealthNote = "divider recovery failed"
+                Log.event("divider recovery failed after own-anchor rebuild; saved layout retained")
+            case .cancelled:
+                s.lastHealthNote = "waiting for system to settle"
+            }
+            completion?(outcome)
+        })
+    }
+
+    /// Never remove another app's item, its saved placement, or our known-good backup.
+    private func rebuildOwnAnchors(at value: Double) {
         if let t = toggleItem { bar.removeStatusItem(t) }
         if let p = pusher { bar.removeStatusItem(p) }
         pusher = nil
         UserDefaults.standard.set(value, forKey: Self.posKey("BB_Toggle"))
         toggleItem = makeToggle()
         buildPusher(anchor: value)
+    }
+
+    private func recreateToggle(at value: Double, completion: StatusItemRecovery.Completion? = nil) {
+        guard canRecoverAnchors else { completion?(.cancelled); return }
+        let generation = SystemMonitor.shared.generation
+        Log.event("recreate ‹ at position \(value)")
+        beginAdjust()
+        rebuildOwnAnchors(at: value)
         apply()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let s = self else { return }
-            s.apply()
-            s.writeOwnPositions(force: true)
             s.endAdjust()
-            if !s.collapsed, !s.pusherAdjacent { s.syncPusher() }
-            completion?()
+            guard generation == SystemMonitor.shared.generation, s.canRecoverAnchors else {
+                completion?(.cancelled); return
+            }
+            s.apply()
+            let healthy = s.toggleOnScreen && s.pusherAdjacent
+            if healthy { s.writeOwnPositions(force: true) }
+            else { s.lastHealthNote = "anchor recreation failed" }
+            completion?(healthy ? .recovered : .failed)
         }
     }
 
@@ -309,7 +355,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     private func validatePositions() {
         guard !isAdjusting, !editing, !forwardPending, !collapsed, SystemMonitor.shared.isStable else { return }
-        if !pusherAdjacent { syncPusher(); return }   // 使用者拖動了 ‹ → pusher 自動跟上
+        if !pusherAdjacent {
+            guard mayRepair("position change") else { return }
+            noteRepair()
+            syncPusher()
+            return
+        }
         if alwaysSepMisplaced { healAlwaysSep(); return }
         backupPositions()
     }
@@ -371,6 +422,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         offscreenStrikes = 0
         ItemMover.cancelRequested = true      // 移動中途要睡了：停下來，醒來後再歸位
         singleItemPresenter.suspend()
+        dividerRecovery.cancel()
+        collapseRequest &+= 1
+        restoreDesiredCollapse()
         restoreMenuBarIfBorrowed()
         floatBar.close()
     }
@@ -378,13 +432,18 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private func systemSettled(_ why: String) {
         singleItemPresenter.resume()
         if !menuOpen { toggleItem.menu = nil }
-        recoveryAttempts.removeAll()          // 新的過渡期：修復與歸位的退避重新計算
+        dividerRecovery.cancel()
+        repairBudget.reset()                 // Only a real settle/manual retry renews the budget.
+        lastHealthNote = "system settled"
         restoreBackoffUntil = .distantPast
         restoreBackoff = 30
+        restoreDesiredCollapse()
         apply()
         healthCheck(why)
-        // 外接螢幕喚醒後常會再換一次解析度：幾秒後複查，再把被打亂的圖示歸位
+        // Ignore this delayed recheck if another display transition supersedes it.
+        let generation = SystemMonitor.shared.generation
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+            guard generation == SystemMonitor.shared.generation else { return }
             self?.healthCheck("\(why)+6s")
             self?.restoreLayoutIfNeeded(why)
         }
@@ -393,10 +452,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     /// 健康檢查：只在系統穩定時進行；所有修正都不刪除使用者的配置
     func healthCheck(_ why: String) {
         lastHealthCheck = Date()
-        if why == "manual" || why == "url" { recoveryAttempts.removeAll(); lastHealthNote = "—" }
+        if why == "manual" || why == "url" { repairBudget.reset(); lastHealthNote = "—" }
         SystemMonitor.shared.reconcile()
         guard SystemMonitor.shared.isStable else { lastHealthNote = "waiting for system to settle"; return }
-        guard !isAdjusting, !editing, !peeking, !forwardPending, !floatBar.isOpen else { return }
+        guard !isAdjusting, !editing, !peeking, !forwardPending, !floatBar.isOpen, !menuOpen else { return }
         guard toggleItem.button?.window?.frame.width ?? 0 > 0 else {
             guard mayRepair("no window") else { return }
             Log.event("health(\(why)): ‹ has no window → recreate")
@@ -420,7 +479,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             if pusher.length < Self.hugeWidth { apply() }
             if !pusherAdjacent { repairCollapsedDivider(); return }
         } else {
-            if !pusherAdjacent { syncPusher(); lastHealthNote = "re-anchored divider"; return }
+            if !pusherAdjacent {
+                guard mayRepair("expanded divider") else { return }
+                noteRepair()
+                syncPusher()
+                return
+            }
             if alwaysSepMisplaced { healAlwaysSep(); return }
         }
         if position("BB_Toggle") == nil || (!collapsed && position("BB_Pusher") == nil) { writeOwnPositions() }
@@ -430,73 +494,92 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         if lastHealthNote != "repair paused" { lastHealthNote = "ok" }
     }
 
-    /// 修復退避：10 分鐘內最多兩次；之後要等下一次系統過渡（喚醒、換螢幕）或手動檢查才再試，
-    /// 避免與其他選單列管理工具（同樣用超寬項目擠圖示）無止盡地互相拉扯
+    /// Two attempts per settled session; do not restart a known-failing repair
+    /// every ten minutes while the user is away. Manual check explicitly retries.
     private func mayRepair(_ what: String) -> Bool {
-        let now = Date()
-        recoveryAttempts = recoveryAttempts.filter { now.timeIntervalSince($0) < 600 }
-        guard recoveryAttempts.count < 2 else {
-            if lastHealthNote != "repair paused" { Log.event("repair paused (\(what)): too many attempts, waiting for next settle") }
+        guard repairBudget.take() else {
+            if lastHealthNote != "repair paused" { Log.event("repair paused (\(what)): waiting for next settle or manual retry") }
             lastHealthNote = "repair paused"
             return false
         }
-        recoveryAttempts.append(now)
         return true
     }
 
-    /// 收合中 pusher 卻沒貼著 ‹（中間夾著本該收起的圖示）：短暫展開、重新貼齊、再收合
+    /// Expand only for background anchor repair, not for a panel's single-item click.
     private func repairCollapsedDivider() {
         guard mayRepair("divider") else { return }
-        Log.event("collapsed but divider not next to ‹ → expand, re-anchor, collapse")
+        Log.event("collapsed but divider not next to ‹ → verified anchor repair")
         noteRepair()
         beginAdjust()
+        let generation = SystemMonitor.shared.generation
         collapsed = false
         apply()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let s = self else { return }
             s.endAdjust()
-            s.syncPusher { [weak s] in s?.reallySetCollapsed(true, reason: .other) }
+            guard generation == SystemMonitor.shared.generation else { return }
+            guard s.canRecoverAnchors else { s.restoreDesiredCollapse(); return }
+            s.syncPusher { [weak s] outcome in
+                guard let s else { return }
+                switch outcome {
+                case .recovered: s.reallySetCollapsed(s.prefs.collapsed, reason: .other)
+                case .cancelled: s.restoreDesiredCollapse()
+                case .failed: Toast.show(L.toastRecoveryFailed.s, kind: .warning, near: s.arrowScreenFrame)
+                }
+            }
         }
     }
 
-    /// ‹ 在穩定狀態下連續兩次不在任何螢幕上：先展開（多半是被排到 pusher 左邊），不行才重建 ‹
+    private func restoreDesiredCollapse() {
+        guard !editing, !peeking, !forwardPending else { return }
+        collapsed = prefs.collapsed
+        alwaysRevealed = false
+        apply()
+    }
+
+    /// Expand to find our toggle, then verify the anchors before claiming recovery.
     private func recoverOffscreen() {
         offscreenStrikes = 0
         guard mayRepair("off-screen") else { return }
         noteRepair()
         Log.event("recover: ‹ off-screen → expand first")
         beginAdjust()
-        let wasCollapsed = collapsed
+        let generation = SystemMonitor.shared.generation
         collapsed = false
         alwaysRevealed = prefs.alwaysHiddenEnabled
         apply()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             guard let s = self else { return }
             s.endAdjust()
+            guard generation == SystemMonitor.shared.generation else { return }
+            guard s.canRecoverAnchors else { s.restoreDesiredCollapse(); return }
             s.alwaysRevealed = false
             s.apply()
-            let finish = { [weak s] in
+            let finish: StatusItemRecovery.Completion = { [weak s] outcome in
                 guard let s else { return }
-                if wasCollapsed { s.setCollapsed(true, reason: .other) } else { s.prefs.collapsed = false }
+                switch outcome {
+                case .recovered:
+                    s.reallySetCollapsed(s.prefs.collapsed, reason: .other)
+                    Toast.show(L.toastRecovered.s, kind: .info, near: s.arrowScreenFrame)
+                case .cancelled: s.restoreDesiredCollapse()
+                case .failed: Toast.show(L.toastRecoveryFailed.s, kind: .warning, near: s.arrowScreenFrame)
+                }
             }
             if s.toggleOnScreen {
-                Log.event("recover: ‹ visible after expanding → re-anchor dividers")
-                s.syncPusher { [weak s] in
-                    guard let s else { return }
-                    if s.alwaysSepMisplaced { s.healAlwaysSep() }
-                    finish()
+                s.syncPusher { [weak s] outcome in
+                    if outcome == .recovered, s?.alwaysSepMisplaced == true { s?.healAlwaysSep() }
+                    finish(outcome)
                 }
             } else {
                 s.recreateToggle(at: s.positionBackup ?? 1.0, completion: finish)
             }
-            Toast.show(L.toastRecovered.s, kind: .info, near: s.arrowScreenFrame)
         }
     }
 
     private func noteRepair() {
         repairCount += 1
         UserDefaults.standard.set(repairCount, forKey: "bb.repairCount")
-        lastHealthNote = "repaired"
+        lastHealthNote = "repairing"
     }
 
     /// ‹ 自己被 macOS 因空間不足藏起來（點不到）：持續約一分鐘就提示一次（每天最多一次）
@@ -521,7 +604,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     var healthSummary: String {
         "singleItem=\(singleItemPresenter.summary) collapsed=\(collapsed) editing=\(editing) adjacent=\(pusherAdjacent) onScreen=\(toggleOnScreen) "
             + "pos=\(position("BB_Toggle").map { String($0) } ?? "nil")/\(position("BB_Pusher").map { String($0) } ?? "nil") "
-            + "backup=\(positionBackup.map { String($0) } ?? "nil") repairs=\(repairCount) note=\(lastHealthNote)"
+            + "backup=\(positionBackup.map { String($0) } ?? "nil") repairs=\(repairCount) "
+            + "recovering=\(dividerRecovery.isRunning) budget=\(repairBudget.attempts)/2 note=\(lastHealthNote)"
     }
 
     // MARK: - 狀態套用
@@ -558,9 +642,15 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     func setCollapsed(_ c: Bool, reason: ExpandReason = .click) {
         guard c || !forwardPending else { return }
+        collapseRequest &+= 1
+        let request = collapseRequest
         // 收合前先確保 pusher 貼緊 ‹，才會把正確的區塊藏起來
         if c, !collapsed, !pusherAdjacent {
-            syncPusher { [weak self] in self?.reallySetCollapsed(true, reason: reason) }
+            syncPusher { [weak self] outcome in
+                guard let s = self, s.collapseRequest == request else { return }
+                if outcome == .recovered { s.reallySetCollapsed(true, reason: reason) }
+                else if outcome == .failed { Toast.show(L.toastRecoveryFailed.s, kind: .warning, near: s.arrowScreenFrame) }
+            }
             return
         }
         reallySetCollapsed(c, reason: reason)
@@ -693,7 +783,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let blocker: String? = !item.movable ? L.itemLocked.s
             : !AXPresser.trusted ? L.moveNeedsAX.s
             : !SystemMonitor.shared.canPostEvents ? L.moveLocked.s
-            : ItemMover.isMoving ? L.moveBusy.s : nil
+            : (ItemMover.isMoving || isRepairingStatusItems) ? L.moveBusy.s : nil
         if let blocker {
             Toast.show(blocker, kind: .warning, near: arrowScreenFrame)
             if !AXPresser.trusted { AXPresser.promptForPermission() }
@@ -718,11 +808,24 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 「全部收起」：‹ 移到最右端（其他圖示全部進收合區）；「全部顯示」：‹ 移到最左端
     func relocateToggle(rightEnd: Bool) {
-        guard !forwardPending else { Toast.show(L.moveBusy.s, kind: .info, near: arrowScreenFrame); return }
-        Log.event("relocate ‹ → \(rightEnd ? "right end" : "left end")")
-        recreateToggle(at: rightEnd ? 1.0 : 99_999)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
-            self?.rememberLayout(rightEnd ? "hide all" : "show all")
+        guard !forwardPending, !isRepairingStatusItems else {
+            Toast.show(L.moveBusy.s, kind: .info, near: arrowScreenFrame); return
+        }
+        // A status-menu action may run just before menuDidClose. Let tracking end
+        // before replacing its owner, and never remember an unsuccessful move.
+        DispatchQueue.main.async { [weak self] in
+            guard let s = self, !s.isRepairingStatusItems else { return }
+            Log.event("relocate ‹ → \(rightEnd ? "right end" : "left end")")
+            s.recreateToggle(at: rightEnd ? 1.0 : 99_999) { [weak s] outcome in
+                guard let s else { return }
+                if outcome == .recovered {
+                    DispatchQueue.main.async { [weak s] in
+                        s?.rememberLayout(rightEnd ? "hide all" : "show all")
+                    }
+                } else if outcome == .failed {
+                    Toast.show(L.toastRecoveryFailed.s, kind: .warning, near: s.arrowScreenFrame)
+                }
+            }
         }
     }
 
@@ -730,14 +833,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 以目前畫面為準記住每個圖示的區塊（使用者確認過的整體配置：全部收起／顯示、開啟記憶）
     func rememberLayout(_ reason: String) {
-        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending else { return }
+        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending, !isRepairingStatusItems else { return }
         LayoutMemory.shared.record(layoutSnapshot(), reason: reason)
     }
 
     /// 使用者移動了一個圖示：只記這一個（其他圖示若正等著歸位，不能順便把錯的位置記下來）。
     /// 還沒有任何記憶時，以目前整條選單列為起點。
     func rememberMove(_ windowID: Int, to dest: BarSection) {
-        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending else { return }
+        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending, !isRepairingStatusItems else { return }
         let snap = snapshot()
         if LayoutMemory.shared.pins.isEmpty {
             LayoutMemory.shared.record(snap, reason: "first move")
@@ -749,7 +852,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// 使用者自己 ⌘ 拖曳完：和拖曳前（上次健康檢查）比對，只記換了區塊的圖示
     private func rememberUserArrangement() {
-        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending else { return }
+        guard prefs.rememberLayout, AXPresser.trusted, !forwardPending, !isRepairingStatusItems else { return }
         let snap = snapshot()
         if LayoutMemory.shared.pins.isEmpty || lastKnownSections.isEmpty {
             LayoutMemory.shared.record(snap, reason: "user ⌘-drag")
@@ -1189,10 +1292,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // NSTrackingArea 呼叫的是 Objective-C 選擇器 mouseEntered: / mouseExited:，必須明確標註
     @objc(mouseEntered:) func mouseEntered(_ event: NSEvent) {
         Log.core.info("mouseEntered hover=\(self.prefs.hoverToExpand) collapsed=\(self.collapsed)")
-        guard prefs.hoverToExpand, toggleItem.menu == nil, !editing, !forwardPending else { return }
+        guard prefs.hoverToExpand, toggleItem.menu == nil, !isAdjusting, !editing, !forwardPending else { return }
         hoverWork?.cancel()
         let w = DispatchWorkItem { [weak self] in
-            guard let s = self, s.prefs.hoverToExpand, !s.editing, !s.forwardPending else { return }
+            guard let s = self, s.prefs.hoverToExpand, !s.isAdjusting, !s.editing, !s.forwardPending else { return }
             // 觸發當下再確認滑鼠真的還停在 ‹ 上：路過不誤觸，也不受 AppKit 偶發的瞬間 exit 雜訊影響
             guard let f = s.arrowScreenFrame, f.insetBy(dx: -4, dy: -4).contains(NSEvent.mouseLocation) else { return }
             SystemMonitor.shared.noteUserActivity()

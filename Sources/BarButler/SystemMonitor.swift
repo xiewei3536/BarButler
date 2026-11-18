@@ -13,6 +13,7 @@ final class SystemMonitor {
     private(set) var screensAsleep = false
     private(set) var sessionActive = true
     private(set) var screenLocked = false
+    private(set) var generation: UInt64 = 0
     private(set) var lastTransition: (reason: String, at: Date)?
     private var quietUntil = Date.distantPast
     private var settleWork: DispatchWorkItem?
@@ -25,7 +26,7 @@ final class SystemMonitor {
 
     /// 醒著、螢幕亮著、組態變動已平息——只有這時才可以依幾何位置做判斷或修正
     var isStable: Bool {
-        !systemAsleep && !screensAsleep && sessionActive && Date() >= quietUntil
+        !systemAsleep && !screensAsleep && sessionActive && !screenLocked && Date() >= quietUntil
             && !NSScreen.screens.isEmpty && CGDisplayIsAsleep(CGMainDisplayID()) == 0
     }
 
@@ -35,6 +36,7 @@ final class SystemMonitor {
     /// 系統穩定下來（喚醒、換螢幕、解鎖之後）時呼叫
     func onSettled(_ h: @escaping (String) -> Void) { settledHandlers.append(h) }
     /// 即將睡眠時呼叫
+    /// Suspends work for system/display sleep, session changes, and screen lock.
     func onWillSleep(_ h: @escaping () -> Void) { sleepHandlers.append(h) }
 
     func start() {
@@ -47,7 +49,7 @@ final class SystemMonitor {
             s.inputCountAtSleep = CGEventSource.counterForEventType(.combinedSessionState, eventType: Self.anyInput)
             s.settleWork?.cancel()
             Log.event("system will sleep")
-            s.sleepHandlers.forEach { $0() }
+            s.suspendRepairs()
         }
         ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.systemAsleep = false
@@ -57,6 +59,7 @@ final class SystemMonitor {
             self?.screensAsleep = true
             self?.inputCountAtSleep = CGEventSource.counterForEventType(.combinedSessionState, eventType: Self.anyInput)
             Log.event("screens did sleep")
+            self?.suspendRepairs()
         }
         ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.screensAsleep = false
@@ -65,6 +68,7 @@ final class SystemMonitor {
         ws.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.sessionActive = false
             Log.event("session resigned")
+            self?.suspendRepairs()
         }
         ws.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.sessionActive = true
@@ -78,6 +82,7 @@ final class SystemMonitor {
         dnc.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
             self?.screenLocked = true
             Log.event("screen locked")
+            self?.suspendRepairs()
         }
         dnc.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
             self?.screenLocked = false
@@ -85,8 +90,15 @@ final class SystemMonitor {
         }
     }
 
+    private func suspendRepairs() {
+        generation &+= 1
+        settleWork?.cancel()
+        sleepHandlers.forEach { $0() }
+    }
+
     /// 進入過渡期：quiet 秒內不做任何幾何修正，平息後通知
     func transition(_ reason: String, quiet: TimeInterval) {
+        generation &+= 1
         quietUntil = max(quietUntil, Date().addingTimeInterval(quiet))
         lastTransition = (reason, Date())
         settleAttempts = 0
@@ -131,7 +143,7 @@ final class SystemMonitor {
     }
 
     var summary: String {
-        "stable=\(isStable) asleep=\(systemAsleep) screensAsleep=\(screensAsleep) session=\(sessionActive) locked=\(screenLocked) secureInput=\(IsSecureEventInputEnabled()) screens=\(NSScreen.screens.count)"
+        "stable=\(isStable) asleep=\(systemAsleep) screensAsleep=\(screensAsleep) session=\(sessionActive) locked=\(screenLocked) secureInput=\(IsSecureEventInputEnabled()) screens=\(NSScreen.screens.count) generation=\(generation)"
             + (lastTransition.map { " last=\($0.reason)@\(Self.timeFmt.string(from: $0.at))" } ?? "")
     }
 

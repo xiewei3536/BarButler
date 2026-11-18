@@ -25,7 +25,7 @@ final class ItemMover {
     func move(windowID: Int, to dest: BarSection, via c: StatusBarController, interactive: Bool = true) async throws {
         guard AXPresser.trusted else { throw Failure.permission }
         guard SystemMonitor.shared.canPostEvents else { throw Failure.locked }
-        guard !busy, !c.singleItemInteractionActive else { throw Failure.busy }
+        guard !busy, !c.singleItemInteractionActive, !c.isRepairingStatusItems else { throw Failure.busy }
         busy = true
         Self.cancelRequested = false
         defer { busy = false }
@@ -85,7 +85,7 @@ final class ItemMover {
                       via c: StatusBarController) async throws {
         guard AXPresser.trusted else { throw Failure.permission }
         guard SystemMonitor.shared.canPostEvents else { throw Failure.locked }
-        guard !busy, NSEvent.pressedMouseButtons == 0 else { throw Failure.busy }
+        guard !busy, !c.isRepairingStatusItems, NSEvent.pressedMouseButtons == 0 else { throw Failure.busy }
         try Task.checkCancellation()
         busy = true
         Self.cancelRequested = false
