@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-18 — 1.5.0 distribution paused / 暫停推送 1.5.0
+
+- Paused automatic distribution of 1.5.0 after a report of an unavailable menu-bar
+  interface following display sleep/wake. Investigation found a live process and
+  repeated divider re-anchoring failures, not a recorded process crash.
+- The stable update feed points back to 1.4.1 while the recovery path is verified.
+  Existing 1.5.0 installations are not silently downgraded. Preferences and saved
+  icon layouts must be retained during manual recovery.
+
 ## 1.5.0 — 2026-11-17
 
 ### Focused panel clicks / 單一圖示聚焦 / 单图标聚焦
